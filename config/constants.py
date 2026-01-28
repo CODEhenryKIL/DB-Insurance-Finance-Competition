@@ -22,6 +22,15 @@ from datetime import datetime
 # 1. 데이터 수집 설정
 # ===========================================
 
+# ⭐ 테스트 모드 (17개 티커로 빠른 검증)
+TEST_MODE = False  # False로 변경하면 전체 S&P 500 실행
+
+# 테스트용 17개 티커 (다양한 섹터 포함)
+TEST_TICKERS = [
+    'BIIB', 'EW', 'RF', 'EXPD', 'IQV', 'MO', 'DD', 'ABT', 'COST',
+    'AMZN', 'ANET', 'XYZ', 'AIZ', 'PYPL', 'TROW', 'HPQ', 'STE'
+]
+
 # 데이터 수집 시작 연도
 # 2012년부터 수집 (m1 계산용 3년 R&D 누적 데이터 확보용)
 START_YEAR = 2012

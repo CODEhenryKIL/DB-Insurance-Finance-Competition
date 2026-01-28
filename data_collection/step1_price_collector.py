@@ -49,7 +49,9 @@ from config.constants import (
     START_YEAR,
     CURRENT_YEAR,
     EXCLUDED_SECTORS,
-    API_SLEEP_SECONDS
+    API_SLEEP_SECONDS,
+    TEST_MODE,
+    TEST_TICKERS
 )
 from config.paths import (
     STEP1_PRICE_ADJ_CSV,
@@ -112,7 +114,14 @@ class PriceCollector:
     def get_sp500_tickers(self) -> List[str]:
         """
         Wikipedia에서 S&P 500 티커 리스트 수집
+        TEST_MODE=True이면 17개 티커만 반환
         """
+        # ⭐ 테스트 모드 체크
+        if TEST_MODE:
+            logger.info("⚠️  TEST MODE: 17개 티커만 사용")
+            logger.info(f"  → 티커: {TEST_TICKERS}")
+            return TEST_TICKERS
+        
         logger.info("S&P500 티커 리스트 수집 중...")
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         
