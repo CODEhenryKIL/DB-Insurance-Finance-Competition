@@ -484,7 +484,10 @@ class PortfolioBacktester:
         years = len(benchmark_returns)
         benchmark_cagr = calculate_cagr(benchmark_returns, years)
         benchmark_sharpe = calculate_sharpe_ratio(benchmark_returns)
-        benchmark_mdd = calculate_mdd(benchmark_returns)
+        
+        # MDD는 cumulative returns 필요
+        benchmark_cumulative = (1 + benchmark_returns).cumprod()
+        benchmark_mdd = calculate_mdd(benchmark_cumulative)
         
         # ⭐ 30% 전략에 대해 벤치마크 비교 테이블 출력
         ratio_30_metrics = [m for m in performance_summary if m['Long_Ratio'] == 0.30]
