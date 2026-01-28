@@ -272,3 +272,56 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("✅ 테스트 완료")
     print("="*60)
+
+
+def calculate_information_ratio(
+    returns: pd.Series,
+    benchmark_returns: pd.Series,
+    periods_per_year: int = 12
+) -> float:
+    """
+    Information Ratio 계산
+    
+    IR = E[포트폴리오 - 벤치마크] / Std(포트폴리오 - 벤치마크)
+    
+    의미: 단위 추적오차당 초과수익률
+    
+    Parameters
+    ----------
+    returns : Series
+        포트폴리오 월별 수익률
+    benchmark_returns : Series
+        벤치마크 월별 수익률
+    periods_per_year : int
+        연간화 계수 (기본값 12개월)
+    
+    Returns
+    -------
+    float
+        Information Ratio (연간화)
+    """
+    if len(returns) < 2 or len(benchmark_returns) < 2:
+        return np.nan
+    
+    # 공통 인덱스로 정렬
+    combined = pd.DataFrame({
+        'portfolio': returns,
+        'benchmark': benchmark_returns
+    }).dropna()
+    
+    if len(combined) < 2:
+        return np.nan
+    
+    # 초과 수익률
+    excess_returns = combined['portfolio'] - combined['benchmark']
+    
+    # IR = 평균 / 표준편차 (연간화)
+    mean_excess = excess_returns.mean() * periods_per_year
+    std_excess = excess_returns.std() * np.sqrt(periods_per_year)
+    
+    if std_excess == 0:
+        return np.nan
+    
+    ir = mean_excess / std_excess
+    
+    return ir

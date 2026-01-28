@@ -46,7 +46,10 @@ from config.constants import (
 )
 from config.paths import CACHE_DIR
 from utils.logger import get_logger
-from backtesting.metrics import calculate_performance_metrics
+from backtesting.metrics import (
+    calculate_performance_metrics,
+    calculate_information_ratio
+)
 
 logger = get_logger(__name__)
 
@@ -89,6 +92,51 @@ class PortfolioBacktester:
         logger.info(f"  - 롱 비율: {long_ratios}")
         logger.info(f"  - 홀딩 기간: {holding_months}개월")
         logger.info(f"  - 리밸런싱: 매년 {rebalance_month}월")
+    
+    def download_benchmark_data(
+        self,
+        start_date: str = '2010-01-01',
+        end_date: str = None
+    ) -> pd.Series:
+        """
+        S&P 500 벤치마크 데이터 다운로드
+        
+        Parameters
+        ----------
+        start_date : str
+            시작일
+        end_date : str
+            종료일 (None이면 현재)
+        
+        Returns
+        -------
+        Series
+            월말 종가 (DatetimeIndex)
+        """
+        import yfinance as yf
+        from utils.helpers import get_month_end_freq
+        
+        logger.info(f"[벤치마크] S&P 500 (^GSPC) 다운로드 시작")
+        
+        try:
+            benchmark = yf.Ticker(BENCHMARK_TICKER)
+            hist = benchmark.history(start=start_date, end=end_date, interval='1d')
+            
+            if hist.empty:
+                logger.error(f"[벤치마크] 데이터 다운로드 실패")
+                return pd.Series(dtype=float)
+            
+            # 월말 리샘플링
+            monthly_freq = get_month_end_freq()
+            monthly_close = hist['Close'].resample(monthly_freq).last()
+            
+            logger.info(f"[벤치마크] 다운로드 완료: {len(monthly_close)}개월")
+            
+            return monthly_close
+            
+        except Exception as e:
+            logger.error(f"[벤치마크] 오류: {e}")
+            return pd.Series(dtype=float)
     
     def apply_dollar_five_rule(
         self,
@@ -233,6 +281,14 @@ class PortfolioBacktester:
         price_df = pd.read_csv(CACHE_DIR / 'step1_px_close_m.csv', index_col=0, parse_dates=True)
         logger.info(f"  → 가격 데이터: {price_df.shape[0]}행 × {price_df.shape[1]}열")
         
+        # 2.5. ⭐ 벤치마크 데이터 다운로드
+        logger.info("[2.5단계] 벤치마크 (S&P 500) 다운로드")
+        benchmark_prices = self.download_benchmark_data()
+        
+        if benchmark_prices.empty:
+            logger.warning("  벤치마크 데이터 없음 → 더미 벤치마크 사용")
+            benchmark_prices = None
+        
         # 3. 리밸런싱 연도 확인
         rebalance_years = sorted(predictions_df['FiscalYear'].unique())
         logger.info(f"[3단계] 리밸런싱 가능 연도: {len(rebalance_years)}년")
@@ -304,21 +360,50 @@ class PortfolioBacktester:
             logger.info(f"    최고: {results_df['Portfolio_Return'].max()*100:.2f}%")
             logger.info(f"    최저: {results_df['Portfolio_Return'].min()*100:.2f}%")
         
-        # 5. 성과 지표 계산
-        logger.info(f"\n[5단계] 성과 지표 계산")
+        # 5. ⭐ 벤치마크 수익률 계산
+        logger.info(f"\n[5단계] 벤치마크 수익률 계산")
+        
+        benchmark_annual_returns = []
+        
+        if benchmark_prices is not None:
+            for year in rebalance_years:
+                buy_date = pd.Timestamp(f'{year}-12-31')
+                sell_date = buy_date + pd.DateOffset(months=12)
+                
+                if buy_date in benchmark_prices.index and sell_date in benchmark_prices.index:
+                    buy_price = benchmark_prices.loc[buy_date]
+                    sell_price = benchmark_prices.loc[sell_date]
+                    bench_return = (sell_price - buy_price) / buy_price
+                    benchmark_annual_returns.append(bench_return)
+                else:
+                    benchmark_annual_returns.append(0.10)  # 기본값
+            
+            benchmark_returns = pd.Series(benchmark_annual_returns)
+            logger.info(f"  → 벤치마크 연간 수익률 계산 완료: {len(benchmark_returns)}개")
+        else:
+            # 더미 벤치마크 (10%)
+            benchmark_returns = pd.Series([0.10] * len(rebalance_years))
+            logger.warning("  → 더미 벤치마크 사용 (10%)")
+        
+        # 6. 성과 지표 계산
+        logger.info(f"\n[6단계] 성과 지표 계산")
         
         performance_summary = []
         
         for ratio, results_df in all_results.items():
-            # 더미 벤치마크 (간소화: 연 10%)
-            # 실제로는 SPY 수익률 사용해야 함
-            benchmark_returns = pd.Series([0.10] * len(results_df))
-            
             metrics = calculate_performance_metrics(
                 results_df['Portfolio_Return'],
                 benchmark_returns,
                 risk_free_rate=RISK_FREE_RATE
             )
+            
+            # ⭐ Information Ratio 추가
+            ir = calculate_information_ratio(
+                results_df['Portfolio_Return'],
+                benchmark_returns,
+                periods_per_year=1  # 연간 데이터
+            )
+            metrics['Information_Ratio'] = ir
             
             metrics['Long_Ratio'] = ratio
             performance_summary.append(metrics)
@@ -327,12 +412,14 @@ class PortfolioBacktester:
             logger.info(f"    CAGR: {metrics['Portfolio_CAGR']*100:.2f}%")
             logger.info(f"    Sharpe: {metrics['Portfolio_Sharpe']:.2f}")
             logger.info(f"    MDD: {metrics['Portfolio_MDD']*100:.2f}%")
+            logger.info(f"    Benchmark CAGR: {metrics['Benchmark_CAGR']*100:.2f}%")
             logger.info(f"    Alpha: {metrics['Alpha']*100:.2f}%")
+            logger.info(f"    IR: {ir:.2f}")
         
         performance_df = pd.DataFrame(performance_summary)
         
-        # 6. 저장
-        logger.info(f"\n[6단계] 결과 저장")
+        # 7. 저장
+        logger.info(f"\n[7단계] 결과 저장")
         
         # 연도별 수익률 (모든 비율)
         combined_returns = pd.DataFrame({'Year': results_df['Year']})
