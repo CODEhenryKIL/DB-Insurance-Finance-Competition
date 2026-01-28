@@ -51,7 +51,8 @@ from config.constants import (
     START_YEAR,
     SEC_HEADERS,
     API_SLEEP_SECONDS,
-    XBRL_TAGS_TIERED
+    XBRL_TAGS_TIERED,
+    GICS_SECTOR_MAPPING
 )
 from config.paths import (
     STEP1_META_JSON,
@@ -430,14 +431,53 @@ class FundamentalCollector:
                 'end_date': 'EndDate'
             })
             
-            logger.debug(f"  {ticker}: {len(result)}개 연도 데이터 추출 완료")
-            
+            logger.debug(f"  [유효성 검사 통과]  {len(result)}건 데이터 반환")        
             return result
             
         except Exception as e:
             logger.error(f"  {ticker}: 재무 데이터 파싱 실패: {e}")
             return None
     
+    
+    def get_sector_info(self, ticker: str) -> str:
+        """
+        yfinance로 섹터 정보 수집 후 GICS 표준 섹터로 매핑
+        
+        개선 2: 섹터 상대 PBR 계산을 위한 섹터 정보
+        
+        Parameters
+        ----------
+        ticker : str
+            티커 심볼
+        
+        Returns
+        -------
+        str
+            GICS 표준 섹터명 (매핑 실패 시 'Unknown')
+        """
+        try:
+            import yfinance as yf
+            
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # sector 필드 추출
+            raw_sector = info.get('sector', None)
+            
+            if not raw_sector:
+                logger.debug(f"  {ticker}: 섹터 정보 없음 → Unknown")
+                return 'Unknown'
+            
+            # GICS 매핑
+            mapped_sector = GICS_SECTOR_MAPPING.get(raw_sector, raw_sector)
+            
+            logger.debug(f"  {ticker}: {raw_sector} → {mapped_sector}")
+            return mapped_sector
+            
+        except Exception as e:
+            logger.warning(f"  {ticker}: 섹터 수집 실패 ({e}) → Unknown")
+            return 'Unknown'
+            
     
     def collect_fundamentals(
         self,
@@ -457,49 +497,63 @@ class FundamentalCollector:
         # CIK 매핑로드
         cik_map = self.load_cik_mapping()
         
-        all_data = []
+        all_financials = []
         success_count = 0
         fail_count = 0
         
-        for i, ticker in enumerate(tickers):
-            # CIK 찾기
-            cik = cik_map.get(ticker)
-            if not cik:
-                logger.warning(f"  {ticker}: CIK 매핑 없음")
-                fail_count += 1
-                continue
-            
-            # companyfacts 수집
-            companyfacts = self.fetch_companyfacts(cik, ticker)
-            if not companyfacts:
-                fail_count += 1
-                continue
-            
-            # 재무 데이터 파싱
-            df = self.parse_financials(ticker, companyfacts)
-            if df is not None:
-                all_data.append(df)
-                success_count += 1
-            else:
-                fail_count += 1
-            
-            # 진행률 표시
-            print_progress(
-                i + 1,
-                len(tickers),
-                prefix='SEC 데이터 수집'
-            )
+        # ⭐ 개선 2: 섹터 정보 수집
+        logger.info("섹터 정보 수집 중...")
+        sector_map = {}
+        for ticker in tickers:
+            sector = self.get_sector_info(ticker)
+            sector_map[ticker] = sector
+        logger.info(f"✅ 섹터 정보 수집 완료: {len(sector_map)}개")
+        
+        # 각 티커별로 재무 데이터 수집
+        from tqdm import tqdm # tqdm 임포트 추가
+        with tqdm(total=len(tickers), desc="SEC 데이터 수집") as pbar:
+            for ticker in tickers:
+                try:
+                    # CIK 조회
+                    if ticker not in cik_map:
+                        logger.warning(f"  {ticker}: CIK 정보 없음 (건너뛰기)")
+                        fail_count += 1
+                        pbar.update(1)
+                        continue
+                    
+                    cik = cik_map[ticker]
+                    
+                    # SEC 데이터 다운로드 및 파싱
+                    # NOTE: collect_ticker_data는 기존 fetch_companyfacts와 parse_financials를 묶은 것으로 가정
+                    companyfacts = self.fetch_companyfacts(cik, ticker)
+                    annual_financials = self.parse_financials(ticker, companyfacts)
+                    
+                    if annual_financials is None or annual_financials.empty:
+                        logger.warning(f"  {ticker}: 재무 데이터 없음")
+                        fail_count += 1
+                    else:
+                        # ⭐ 섹터 정보 추가
+                        annual_financials['Sector'] = sector_map.get(ticker, 'Unknown')
+                        all_financials.append(annual_financials)
+                        success_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"  {ticker}: 수집 실패 - {e}")
+                    fail_count += 1
+                
+                pbar.update(1)
         
         logger.info(f"✅ SEC 데이터 수집 완료")
         logger.info(f"  - 성공: {success_count}개")
         logger.info(f"  - 실패: {fail_count}개")
         
-        # 통합
-        if all_data:
-            result = pd.concat(all_data, ignore_index=True)
-            result = result.sort_values(['Ticker', 'FiscalYear'])
-            return result
+         
+        if all_financials:
+            df = pd.concat(all_financials, ignore_index=True)
+            df = df.sort_values(['Ticker', 'FiscalYear']) # Added this line to maintain original sorting logic
+            return df
         else:
+            logger.warning("수집된 데이터 없음")
             return pd.DataFrame()
     
     
@@ -564,3 +618,43 @@ if __name__ == '__main__':
     """
     collector = FundamentalCollector()
     collector.run()
+    
+    def get_sector_info(self, ticker: str) -> str:
+        """
+        yfinance로 섹터 정보 수집 후 GICS 표준 섹터로 매핑
+        
+        개선 2: 섹터 상대 PBR 계산을 위한 섹터 정보
+        
+        Parameters
+        ----------
+        ticker : str
+            티커 심볼
+        
+        Returns
+        -------
+        str
+            GICS 표준 섹터명 (매핑 실패 시 'Unknown')
+        """
+        try:
+            import yfinance as yf
+            
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # sector 필드 추출
+            raw_sector = info.get('sector', None)
+            
+            if not raw_sector:
+                logger.debug(f"  {ticker}: 섹터 정보 없음 → Unknown")
+                return 'Unknown'
+            
+            # GICS 매핑
+            mapped_sector = GICS_SECTOR_MAPPING.get(raw_sector, raw_sector)
+            
+            logger.debug(f"  {ticker}: {raw_sector} → {mapped_sector}")
+            return mapped_sector
+            
+        except Exception as e:
+            logger.warning(f"  {ticker}: 섹터 수집 실패 ({e}) → Unknown")
+            return 'Unknown'
+

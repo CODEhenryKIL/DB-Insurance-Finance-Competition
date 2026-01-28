@@ -334,3 +334,92 @@ XBRL_TAGS_TIERED = {
         ]
     }
 }
+
+
+# ===========================================
+# GICS 섹터 정규화 매핑 (개선 2)
+# ===========================================
+# yfinance의 sector 필드를 GICS 11개 대분류로 표준화
+
+GICS_SECTOR_MAPPING = {
+    # Technology
+    'Information Technology': 'Technology',
+    'Tech': 'Technology',
+    'Technology': 'Technology',
+    'Software': 'Technology',
+    'Hardware': 'Technology',
+    'Semiconductors': 'Technology',
+    
+    # Healthcare
+    'Healthcare': 'Healthcare',
+    'Health Care': 'Healthcare',
+    'Pharmaceuticals': 'Healthcare',
+    'Biotechnology': 'Healthcare',
+    'Medical Devices': 'Healthcare',
+    
+    # Financials (이미 제외됨)
+    'Financials': 'Financials',
+    'Financial Services': 'Financials',
+    'Financial': 'Financials',
+    'Banks': 'Financials',
+    'Insurance': 'Financials',
+    
+    # Consumer Discretionary
+    'Consumer Discretionary': 'Consumer Discretionary',
+    'Consumer Cyclical': 'Consumer Discretionary',
+    'Retail': 'Consumer Discretionary',
+    'Automobiles': 'Consumer Discretionary',
+    
+    # Consumer Staples
+    'Consumer Staples': 'Consumer Staples',
+    'Consumer Defensive': 'Consumer Staples',
+    'Food & Beverage': 'Consumer Staples',
+    
+    # Industrials
+    'Industrials': 'Industrials',
+    'Industrial': 'Industrials',
+    'Aerospace & Defense': 'Industrials',
+    'Transportation': 'Industrials',
+    
+    # Energy (이미 제외됨)
+    'Energy': 'Energy',
+    'Oil & Gas': 'Energy',
+    
+    # Materials (이미 제외됨)
+    'Materials': 'Materials',
+    'Basic Materials': 'Materials',
+    'Chemicals': 'Materials',
+    
+    # Communication Services
+    'Communication Services': 'Communication',
+    'Telecommunication Services': 'Communication',
+    'Media': 'Communication',
+    'Entertainment': 'Communication',
+    
+    # Utilities (이미 제외됨)
+    'Utilities': 'Utilities',
+    'Utility': 'Utilities',
+    
+    # Real Estate
+    'Real Estate': 'Real Estate',
+    'REITs': 'Real Estate',
+}
+
+# GICS 11개 표준 섹터
+GICS_STANDARD_SECTORS = [
+    'Technology',
+    'Healthcare',
+    'Financials',
+    'Consumer Discretionary',
+    'Consumer Staples',
+    'Industrials',
+    'Energy',
+    'Materials',
+    'Communication',
+    'Utilities',
+    'Real Estate'
+]
+
+# 섹터 중앙값 계산 시 최소 샘플 수
+MIN_SECTOR_SAMPLE_SIZE = 5
+

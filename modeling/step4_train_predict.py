@@ -46,7 +46,7 @@ from config.constants import (
     TRAIN_WINDOW_YEARS
 )
 from config.paths import CACHE_DIR
-from utils.logger import get_logger
+from utils.logger import get_logger, log_dataframe_info
 from modeling.model import LinearPBRModel
 
 logger = get_logger(__name__)
@@ -225,10 +225,46 @@ class RollingTrainer:
         logger.info("="*60)
         
         # 1. Step3 피처 로드
-        logger.info("[1단계] Step3 피처 데이터 로드")
+        logger.info("[1단계] Step3 피처 로드")
         features_df = pd.read_csv(CACHE_DIR / 'step3_features_annual.csv', index_col=0)
-        logger.info(f"  → 피처 데이터: {features_df.shape[0]}행 × {features_df.shape[1]}열")
+        logger.info(f"  → Features: {len(features_df)}개")
+        log_dataframe_info(logger, features_df, "Features")
         
+        # ⭐ 개선 2: 섹터 상대 PBR 전처리
+        logger.info("\n[1.5단계] 섹터 상대 PBR 변환")
+        logger.info("  y = ln(PBR) → y_relative = ln(PBR) - Sector_Median")
+        
+        # (1) 전체 유니버스 median (fallback용)
+        global_median_by_year = features_df.groupby('FiscalYear')['y'].median()
+        logger.info(f"  → 전체 유니버스 연도별 Median 계산 완료")
+        
+        # (2) 섹터별 median 계산
+        sector_medians = features_df.groupby(['FiscalYear', 'Sector'])['y'].median()
+        sector_medians.name = 'Sector_Median'
+        
+        # (3) 원본 df에 merge
+        features_df = features_df.merge(
+            sector_medians,
+            left_on=['FiscalYear', 'Sector'],
+            right_index=True,
+            how='left'
+        )
+        
+        # (4) Unknown 또는 결측 시 Global median 사용
+        for idx, row in features_df.iterrows():
+            if pd.isna(row['Sector_Median']) or row['Sector'] == 'Unknown':
+                year = row['FiscalYear']
+                features_df.loc[idx, 'Sector_Median'] = global_median_by_year[year]
+        
+        # (5) 상대 PBR 계산
+        features_df['y_original'] = features_df['y']  # 백업
+        features_df['y'] = features_df['y_original'] - features_df['Sector_Median']
+        
+        logger.info(f"  → 섹터 상대 PBR 변환 완료")
+        logger.info(f"    y 평균: {features_df['y'].mean():.3f} (0에 가까워야 정상)")
+        logger.info(f"    y 표준편차: {features_df['y'].std():.3f}")
+        
+        # 2. 데이터 필터링
         # 유효한 샘플 (m1, m2, m3, y 모두 있음)
         valid_df = features_df.dropna(subset=['m1', 'm2', 'm3', 'y'])
         logger.info(f"  → 유효 샘플: {len(valid_df)}/{len(features_df)} ({len(valid_df)/len(features_df)*100:.1f}%)")

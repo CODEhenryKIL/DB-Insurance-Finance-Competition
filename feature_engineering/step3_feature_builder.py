@@ -312,7 +312,7 @@ class FeatureBuilder:
         features_df = pd.concat(feature_dfs, ignore_index=True)
         
         # 6. 최종 컬럼 선택
-        output_columns = ['Ticker', 'FiscalYear', 'm1', 'm2', 'm3', 'y', 
+        output_columns = ['Ticker', 'FiscalYear', 'm1', 'm2', 'm3', 'y', 'Sector',
                          'Investment', 'Amortization', 'AdjOI', 'OI', 'Equity', 
                          'Shares', 'Price', 'MarketCap']
         features_df = features_df[output_columns]
