@@ -1,0 +1,52 @@
+# M-Model 프로젝트 필수 패키지
+# Python 3.8 이상 권장
+
+# ===== 핵심 데이터 처리 =====
+# Pandas: 데이터프레임 처리 (버전 중요: resample 'ME' 지원을 위해 2.2.0+)
+pandas>=2.2.0
+
+# NumPy: 수치 연산
+numpy>=1.24.0
+
+# ===== 딥러닝/머신러닝 =====
+# PyTorch: 선형 모델 학습
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ===== 데이터 수집 =====
+# yfinance: Yahoo Finance API (가격 데이터)
+yfinance>=0.2.30
+
+# edgartools: SEC Edgar API (재무 데이터 - 우선순위 1)
+edgartools>=2.0.0
+
+# requests: HTTP 요청 (SEC API, FMP API 대안)
+requests>=2.31.0
+
+# beautifulsoup4: HTML 파싱 (필요 시)
+beautifulsoup4>=4.12.0
+
+# ===== 시각화 =====
+# matplotlib: 차트 생성
+matplotlib>=3.7.0
+
+# seaborn: 고급 시각화
+seaborn>=0.12.0
+
+# ===== 유틸리티 =====
+# packaging: 버전 비교 (Pandas 호환성 체크)
+packaging>=23.0
+
+# tqdm: 진행률 바 (선택)
+tqdm>=4.65.0
+
+# python-dateutil: 날짜 파싱
+python-dateutil>=2.8.2
+
+# ===== 개발/테스트 (선택) =====
+# pytest: 테스트 프레임워크
+pytest>=7.4.0
+
+# jupyter: 분석 노트북
+jupyter>=1.0.0
+notebook>=7.0.0
