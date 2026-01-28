@@ -38,8 +38,12 @@ from config.constants import (
     M3_CLIP_MIN, M3_CLIP_MAX,
     PBR_CLIP_MIN, PBR_CLIP_MAX
 )
-from config.paths import CACHE_DIR
-from utils.logger import get_logger
+from config.paths import (
+    CACHE_DIR,
+    STEP3_FEATURES_CSV,
+    STEP2_FUNDAMENTALS_CSV  # ⭐ 추가
+)
+from utils.logger import get_logger, log_dataframe_info
 from utils.helpers import load_cache, save_cache
 from feature_engineering.restatement import restate_financials
 
@@ -234,7 +238,7 @@ class FeatureBuilder:
         restated_df['RD'] = restated_df['RD'].fillna(0)
         restated_df['SGA'] = restated_df['SGA'].fillna(0)
         
-        log_dataframe_info(restated_df, "재무 데이터")
+        log_dataframe_info(logger, restated_df, "재무 데이터")
         
         # 2. 회계 재작성
         logger.info("[2단계] 회계 재작성 (I, A, AdjOI)")

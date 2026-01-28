@@ -7,16 +7,17 @@
 ### 핵심 아이디어
 
 1. **회계 재작성 (Restatement)**
+
    - 미국 GAAP에서는 R&D와 SG&A가 전액 비용 처리
    - K-IFRS 방식으로 일부를 무형자산으로 자산화
    - → 기술주/바이오 기업의 과소평가된 자산과 이익을 복원
-
 2. **3개 피처로 PBR 예측**
+
    - **m1**: 이익 복원력 (AdjOI / OI)
    - **m2**: 투자 가속도 (Intensity 증가율)
    - **m3**: 본업 기초체력 (Pre-Investment Margin 비율)
-
 3. **Gap 기반 롱 전략**
+
    - Gap = 예측 PBR - 시장 PBR
    - Gap이 클수록 저평가 → 롱 포지션
    - 4가지 롱 비율 (5%, 10%, 20%, 30%) 비교
@@ -77,6 +78,7 @@ pip install -r requirements.txt
 ```
 
 **필수 요구사항:**
+
 - Python 3.8 이상
 - Pandas 2.2.0 이상 (월말 resample 'ME' 지원)
 
@@ -87,6 +89,7 @@ python main.py
 ```
 
 실행 순서:
+
 1. Step1: 가격 데이터 수집
 2. Step2: 재무 데이터 수집 (edgartools)
 3. Step3: Feature Engineering
@@ -111,11 +114,13 @@ python main.py --skip-step1 --skip-step2
 ## 📊 데이터 소스
 
 ### 1. 가격 데이터
+
 - **소스**: yfinance (Yahoo Finance API)
 - **내용**: S&P500 월말 종가 및 조정종가
 - **기간**: 2010년 ~ 현재
 
 ### 2. 재무 데이터
+
 - **우선순위 1**: edgartools (SEC Edgar API)
 - **우선순위 2**: SimFin API
 - **최종 대안**: FMP API (유료)
@@ -141,6 +146,7 @@ AdjOI = OI + I - A
 ### 2. 피처 엔지니어링
 
 **m1 (이익 복원력)** - 개선된 클리핑 로직
+
 ```python
 # 기존: abs(OI) < epsilon → NaN (데이터 손실)
 # 개선: 클리핑 방식 (데이터 보존)
@@ -150,12 +156,14 @@ m1 = clip(m1, -5, +5)
 ```
 
 **m2 (투자 가속도)**
+
 ```python
 Intensity = I / Revenue
 m2 = Intensity_t / Avg(Intensity_{t-1}, Intensity_{t-2})
 ```
 
 **m3 (본업 기초체력)**
+
 ```python
 PIM = (OI + I) / Revenue
 m3 = PIM_t / Avg(PIM_{t-1}, PIM_{t-2})
@@ -187,6 +195,7 @@ m3 = PIM_t / Avg(PIM_{t-1}, PIM_{t-2})
 ## 🛡️ 방어 로직 (중요)
 
 ### 1. m1 계산 시
+
 - **문제**: OI ≈ 0인 기업 (바이오, 초기 테크) 데이터 손실
 - **해결**: 결측 처리 대신 클리핑
   ```python
@@ -195,12 +204,15 @@ m3 = PIM_t / Avg(PIM_{t-1}, PIM_{t-2})
   ```
 
 ### 2. BookValue ≤ 0
+
 - ln(PBR) 계산 불가 → NaN 처리 (필수)
 
 ### 3. Revenue = 0
+
 - m2, m3 계산 시 epsilon 적용
 
 ### 4. Pandas 버전 호환
+
 - Pandas >= 2.2.0: resample 'ME'
 - Pandas < 2.2.0: resample 'M'
 - 자동 감지 및 적용 (`utils.helpers.get_month_end_freq()`)
@@ -231,8 +243,9 @@ m3 = PIM_t / Avg(PIM_{t-1}, PIM_{t-2})
 ## 📧 문의
 
 프로젝트 관련 문의사항은 아래로 연락 주세요:
+
 - GitHub Issues
-- Email: contact@example.com
+- Email: sea42471@naver.com
 
 ---
 
@@ -242,5 +255,5 @@ This project is for research purposes only.
 
 ---
 
-**Last Updated**: 2026-01-28  
+**Last Updated**: 2026-01-28
 **Version**: 1.0
