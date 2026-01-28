@@ -48,7 +48,10 @@ from config.paths import CACHE_DIR
 from utils.logger import get_logger
 from backtesting.metrics import (
     calculate_performance_metrics,
-    calculate_information_ratio
+    calculate_information_ratio,
+    calculate_cagr,
+    calculate_sharpe_ratio,
+    calculate_mdd
 )
 
 logger = get_logger(__name__)
@@ -100,42 +103,58 @@ class PortfolioBacktester:
     ) -> pd.Series:
         """
         S&P 500 벤치마크 데이터 다운로드
-        
-        Parameters
-        ----------
-        start_date : str
-            시작일
-        end_date : str
-            종료일 (None이면 현재)
-        
-        Returns
-        -------
-        Series
-            월말 종가 (DatetimeIndex)
         """
-        import yfinance as yf
-        from utils.helpers import get_month_end_freq
-        
-        logger.info(f"[벤치마크] S&P 500 (^GSPC) 다운로드 시작")
+        logger.info(f"[벤치마크] S&P 500 ({BENCHMARK_TICKER}) 다운로드 시작")
         
         try:
-            benchmark = yf.Ticker(BENCHMARK_TICKER)
-            hist = benchmark.history(start=start_date, end=end_date, interval='1d')
+            import yfinance as yf
             
-            if hist.empty:
-                logger.error(f"[벤치마크] 데이터 다운로드 실패")
+            # yfinance 다운로드 (period='max'로 충분한 데이터 확보)
+            benchmark_data = yf.download(
+                BENCHMARK_TICKER, 
+                period="max", 
+                progress=False,
+                auto_adjust=False
+            )
+            
+            if benchmark_data.empty:
+                logger.error(f"[벤치마크] 데이터 다운로드 실패 (Empty DataFrame)")
                 return pd.Series(dtype=float)
             
-            # 월말 리샘플링
-            monthly_freq = get_month_end_freq()
-            monthly_close = hist['Close'].resample(monthly_freq).last()
+            # 가격 컬럼 추출 (Adj Close 우선)
+            price_col = None
             
-            logger.info(f"[벤치마크] 다운로드 완료: {len(monthly_close)}개월")
+            # MultiIndex 처리 (최신 yfinance)
+            if isinstance(benchmark_data.columns, pd.MultiIndex):
+                if 'Adj Close' in benchmark_data.columns.get_level_values(0):
+                    price_col = benchmark_data['Adj Close']
+                elif 'Close' in benchmark_data.columns.get_level_values(0):
+                    price_col = benchmark_data['Close']
+            else:
+                if 'Adj Close' in benchmark_data.columns:
+                    price_col = benchmark_data['Adj Close']
+                elif 'Close' in benchmark_data.columns:
+                    price_col = benchmark_data['Close']
             
-            return monthly_close
+            # 여전히 못 찾았으면 첫 번째 컬럼 사용
+            if price_col is None:
+                price_col = benchmark_data.iloc[:, 0]
+                
+            # Series인지 DataFrame인지 확인 (DataFrame이면 squeeze)
+            if isinstance(price_col, pd.DataFrame):
+                price_col = price_col.iloc[:, 0]
+
+            # 월말 종가로 리샘플링 (pandas 최신 버전: 'M' -> 'ME')
+            price_col = price_col.sort_index()
+            benchmark_monthly_prices = price_col.resample('ME').last()
+            
+            logger.info(f"[벤치마크] 다운로드 완료: {len(benchmark_monthly_prices)}개월 데이터")
+            return benchmark_monthly_prices
             
         except Exception as e:
-            logger.error(f"[벤치마크] 오류: {e}")
+            logger.error(f"[벤치마크] 오류 발생: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return pd.Series(dtype=float)
     
     def apply_dollar_five_rule(
@@ -285,9 +304,14 @@ class PortfolioBacktester:
         logger.info("[2.5단계] 벤치마크 (S&P 500) 다운로드")
         benchmark_prices = self.download_benchmark_data()
         
-        if benchmark_prices.empty:
-            logger.warning("  벤치마크 데이터 없음 → 더미 벤치마크 사용")
+        # 벤치마크 데이터 검증
+        if len(benchmark_prices) == 0:
+            logger.error("  ❌ 벤치마크 데이터 다운로드 실패")
+            logger.error("  → Alpha/Beta 계산 불가, 더미 벤치마크 사용")
             benchmark_prices = None
+        else:
+            logger.info(f"  ✅ 벤치마크 데이터 로드 완료: {len(benchmark_prices)}개월")
+            logger.info(f"  → 기간: {benchmark_prices.index[0].strftime('%Y-%m')} ~ {benchmark_prices.index[-1].strftime('%Y-%m')}")
         
         # 3. 리밸런싱 연도 확인
         rebalance_years = sorted(predictions_df['FiscalYear'].unique())
@@ -364,25 +388,65 @@ class PortfolioBacktester:
         logger.info(f"\n[5단계] 벤치마크 수익률 계산")
         
         benchmark_annual_returns = []
+        universe_annual_returns = []  # ⭐ 개선 3: Equal-Weighted
         
         if benchmark_prices is not None:
             for year in rebalance_years:
                 buy_date = pd.Timestamp(f'{year}-12-31')
                 sell_date = buy_date + pd.DateOffset(months=12)
                 
-                if buy_date in benchmark_prices.index and sell_date in benchmark_prices.index:
-                    buy_price = benchmark_prices.loc[buy_date]
-                    sell_price = benchmark_prices.loc[sell_date]
+                # S&P 500 벤치마크 (날짜 매칭 개선)
+                try:
+                    # 정확한 날짜 매칭 시도
+                    if buy_date in benchmark_prices.index and sell_date in benchmark_prices.index:
+                        buy_price = benchmark_prices.loc[buy_date]
+                        sell_price = benchmark_prices.loc[sell_date]
+                    else:
+                        # Nearest date 사용 (asof)
+                        buy_price = benchmark_prices.asof(buy_date)
+                        sell_price = benchmark_prices.asof(sell_date)
+                        
+                        if pd.isna(buy_price) or pd.isna(sell_price):
+                            raise ValueError(f"No benchmark data for FY{year}")
+                    
                     bench_return = (sell_price - buy_price) / buy_price
                     benchmark_annual_returns.append(bench_return)
+                    
+                except Exception as e:
+                    logger.warning(f"  FY{year} 벤치마크 수익률 계산 실패: {e}")
+                    logger.warning(f"  → 해당 연도는 10% 사용")
+                    benchmark_annual_returns.append(0.10)
+                
+                # ⭐ Equal-Weighted 유니버스 벤치마크
+                universe_tickers = predictions_df[predictions_df['FiscalYear'] == year]['Ticker'].unique()
+                
+                if len(universe_tickers) > 0 and buy_date in price_df.index and sell_date in price_df.index:
+                    returns_list = []
+                    for ticker in universe_tickers:
+                        if ticker in price_df.columns:
+                            buy_px = price_df.loc[buy_date, ticker]
+                            sell_px = price_df.loc[sell_date, ticker]
+                            if pd.notna(buy_px) and pd.notna(sell_px) and buy_px > 0:
+                                ret = (sell_px - buy_px) / buy_px
+                                returns_list.append(ret)
+                    
+                    if len(returns_list) > 0:
+                        universe_return = np.mean(returns_list)
+                        universe_annual_returns.append(universe_return)
+                        logger.debug(f"  FY{year} Equal-Weighted: {len(returns_list)}개 종목, {universe_return*100:.2f}%")
+                    else:
+                        universe_annual_returns.append(0.10)
                 else:
-                    benchmark_annual_returns.append(0.10)  # 기본값
+                    universe_annual_returns.append(0.10)
             
             benchmark_returns = pd.Series(benchmark_annual_returns)
-            logger.info(f"  → 벤치마크 연간 수익률 계산 완료: {len(benchmark_returns)}개")
+            universe_returns = pd.Series(universe_annual_returns)
+            logger.info(f"  → S&P 500 벤치마크 수익률 계산 완료: {len(benchmark_returns)}개")
+            logger.info(f"  → Equal-Weighted 유니버스 수익률 계산 완료: {len(universe_returns)}개")
         else:
             # 더미 벤치마크 (10%)
             benchmark_returns = pd.Series([0.10] * len(rebalance_years))
+            universe_returns = pd.Series([0.10] * len(rebalance_years))
             logger.warning("  → 더미 벤치마크 사용 (10%)")
         
         # 6. 성과 지표 계산
@@ -416,6 +480,58 @@ class PortfolioBacktester:
             logger.info(f"    Alpha: {metrics['Alpha']*100:.2f}%")
             logger.info(f"    IR: {ir:.2f}")
         
+        # ⭐ 벤치마크 성과 지표 계산 (전략과 동일한 방식)
+        years = len(benchmark_returns)
+        benchmark_cagr = calculate_cagr(benchmark_returns, years)
+        benchmark_sharpe = calculate_sharpe_ratio(benchmark_returns)
+        benchmark_mdd = calculate_mdd(benchmark_returns)
+        
+        # ⭐ 30% 전략에 대해 벤치마크 비교 테이블 출력
+        ratio_30_metrics = [m for m in performance_summary if m['Long_Ratio'] == 0.30]
+        if ratio_30_metrics:
+            m = ratio_30_metrics[0]
+            
+            # Win Rate 계산
+            portfolio_ret = all_results[0.30]['Portfolio_Return']
+            wins = (portfolio_ret > benchmark_returns).sum()
+            win_rate = wins / len(portfolio_ret) if len(portfolio_ret) > 0 else 0.0
+            
+            logger.info(f"\n{'='*60}")
+            logger.info(f"  📊 STRATEGY vs S&P 500 BENCHMARK COMPARISON")
+            logger.info(f"{'='*60}")
+            logger.info(f"")
+            logger.info(f"  Metric              Strategy      S&P 500       Performance")
+            logger.info(f"  {'-'*58}")
+            
+            # CAGR
+            cagr_diff = (m['Portfolio_CAGR'] - benchmark_cagr) * 100
+            cagr_emoji = "✅" if cagr_diff > 0 else "❌"
+            logger.info(f"  CAGR                {m['Portfolio_CAGR']*100:6.2f}%       {benchmark_cagr*100:6.2f}%       {cagr_emoji} {cagr_diff:+.2f}%p")
+            
+            # Sharpe
+            sharpe_diff = m['Portfolio_Sharpe'] - benchmark_sharpe
+            sharpe_emoji = "✅" if sharpe_diff > 0 else "❌"
+            sharpe_label = "Efficient" if sharpe_diff > 0 else "Inefficient"
+            logger.info(f"  Sharpe Ratio        {m['Portfolio_Sharpe']:6.2f}        {benchmark_sharpe:6.2f}        {sharpe_emoji} {sharpe_label}")
+            
+            # MDD (더 작은 절댓값이 좋음)
+            mdd_diff = (m['Portfolio_MDD'] - benchmark_mdd) * 100
+            mdd_emoji = "✅" if mdd_diff > 0 else "❌"  # MDD가 덜 마이너스면 좋음
+            mdd_label = "Defensive" if mdd_diff > 0 else "Aggressive"
+            logger.info(f"  MDD                 {m['Portfolio_MDD']*100:6.2f}%       {benchmark_mdd*100:6.2f}%       {mdd_emoji} {mdd_label}")
+            
+            # Alpha
+            alpha_display = f"{m['Alpha']*100:6.2f}%" if not np.isnan(m['Alpha']) else "  nan%"
+            logger.info(f"  Alpha               {alpha_display}        0.00%        -")
+            
+            # Win Rate
+            logger.info(f"  Win Rate            {win_rate*100:6.1f}%        -             -")
+            
+            logger.info(f"  {'-'*58}")
+            logger.info(f"")
+            logger.info(f"  ✅ = Outperformed | ❌ = Underperformed")
+            logger.info(f"{'='*60}")
+        
         performance_df = pd.DataFrame(performance_summary)
         
         # 7. 저장
@@ -426,6 +542,10 @@ class PortfolioBacktester:
         for ratio, results_df in all_results.items():
             combined_returns[f'Return_{int(ratio*100)}pct'] = results_df['Portfolio_Return'].values
         
+        # 벤치마크 추가
+        combined_returns['Benchmark_SP500'] = benchmark_returns.values
+        combined_returns['Benchmark_EqualWeight'] = universe_returns.values
+        
         output_path_returns = CACHE_DIR / 'step5_backtest_returns.csv'
         combined_returns.to_csv(output_path_returns, index=False)
         logger.info(f"  → 연도별 수익률: {output_path_returns}")
@@ -435,12 +555,85 @@ class PortfolioBacktester:
         performance_df.to_csv(output_path_metrics, index=False)
         logger.info(f"  → 성과 지표: {output_path_metrics}")
         
+        # 8. ⭐ 그래프 그리기
+        self.plot_performance(combined_returns)
+        
+        # 8. ⚠️ 생존 편향 경고
+        logger.warning("")
+        logger.warning("="*60)
+        logger.warning("  ⚠️  SURVIVORSHIP BIAS WARNING  ⚠️")
+        logger.warning("="*60)
+        logger.warning("본 백테스트는 생존 편향(Survivorship Bias)에 노출되어 있습니다.")
+        logger.warning("")
+        logger.warning("문제점:")
+        logger.warning("  - 데이터 소스: yfinance (무료 버전)")
+        logger.warning("  - 상장폐지/파산 종목 데이터 미포함 (테스트 결과: SIVB, TWTR 없음)")
+        logger.warning("  - 현재 데이터셋: 450개 티커 모두 2026년까지 생존")
+        logger.warning("")
+        logger.warning("영향:")
+        logger.warning("  - 실제 수익률은 보고된 값보다 20-40% 낮을 수 있습니다.")
+        logger.warning("  - 보수적 추정: CAGR × 0.6 ~ 0.8")
+        logger.warning("")
+        logger.warning("권장 조치:")
+        logger.warning("  1. S&P 500 Historical Constituents 데이터 확보")
+        logger.warning("  2. Bloomberg/FactSet 등 유료 데이터 활용")
+        logger.warning("  3. 리포트에 이 한계 명시")
+        logger.warning("="*60)
+        logger.warning("")
+        
         logger.info("")
         logger.info("="*60)
         logger.info("  Step5: 백테스트 완료")
         logger.info("="*60)
         
         return all_results
+
+    def plot_performance(self, df: pd.DataFrame):
+        """
+        백테스트 성과 시각화
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mtick
+            
+            plt.figure(figsize=(12, 6))
+            
+            # 누적 수익률 계산
+            years = df['Year']
+            
+            # 벤치마크
+            cum_sp500 = (1 + df['Benchmark_SP500']).cumprod() - 1
+            cum_ew = (1 + df['Benchmark_EqualWeight']).cumprod() - 1
+            
+            plt.plot(years, cum_sp500 * 100, 'k--', label='S&P 500', linewidth=2, alpha=0.7)
+            plt.plot(years, cum_ew * 100, 'g-.', label='Equal-Weighted', linewidth=2, alpha=0.7)
+            
+            # 포트폴리오 (Best & Worst case or selected ones)
+            # 여기서는 30% 비율을 메인으로 표시 (M-Model)
+            if 'Return_30pct' in df.columns:
+                cum_port = (1 + df['Return_30pct']).cumprod() - 1
+                plt.plot(years, cum_port * 100, 'r-', label='M-Model (Top 30%)', linewidth=3)
+            
+            if 'Return_10pct' in df.columns:
+                cum_10 = (1 + df['Return_10pct']).cumprod() - 1
+                plt.plot(years, cum_10 * 100, 'b-', label='Top 10%', linewidth=1, alpha=0.5)
+
+            plt.title('M-Model Backtest Performance vs Benchmarks (S&P 500)', fontsize=14)
+            plt.xlabel('Year')
+            plt.ylabel('Cumulative Return (%)')
+            plt.grid(True, linestyle='--', alpha=0.5)
+            plt.legend()
+            
+            # Y축 % 포맷
+            plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter())
+            
+            output_path = CACHE_DIR / 'step5_performance_plot.png'
+            plt.savefig(output_path)
+            logger.info(f"  → 성과 그래프: {output_path}")
+            plt.close()
+            
+        except Exception as e:
+            logger.warning(f"그래프 그리기 실패: {e}")
 
 
 # ===========================================

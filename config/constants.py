@@ -22,8 +22,13 @@ from datetime import datetime
 # 1. 데이터 수집 설정
 # ===========================================
 
-# 데이터 수집 시작 연도 (2010년부터 수집)
-START_YEAR = 2010
+# 데이터 수집 시작 연도
+# 2012년부터 수집 (m1 계산용 3년 R&D 누적 데이터 확보용)
+START_YEAR = 2012
+
+# 백테스트 시작 연도
+# 2015년부터 백테스트 시작 (XBRL 안정화 시점, m1 계산 데이터 충분)
+BACKTEST_START_YEAR = 2015
 
 # 현재 연도 (자동 계산)
 CURRENT_YEAR = datetime.now().year

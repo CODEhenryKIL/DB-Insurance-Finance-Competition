@@ -111,40 +111,44 @@ class PriceCollector:
     
     def get_sp500_tickers(self) -> List[str]:
         """
-        S&P500 티커 리스트를 수집합니다.
-        
-        Wikipedia에서 S&P500 구성 종목 리스트를 가져옵니다.
-        실패 시 대체 방법으로 yfinance의 티커 정보 사용
-        
-        Returns:
-            List[str]: S&P500 티커 리스트
-        
-        사용 예시:
-            tickers = collector.get_sp500_tickers()
-            print(len(tickers))  # 예: 503
+        Wikipedia에서 S&P 500 티커 리스트 수집
         """
         logger.info("S&P500 티커 리스트 수집 중...")
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         
         try:
-            # Wikipedia에서 S&P500 구성 종목 테이블 읽기
-            # 테이블의 첫 번째 항목이 S&P500 리스트
-            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            tables = pd.read_html(url)
-            sp500_table = tables[0]
+            import requests
+            import io
             
-            # 'Symbol' 컬럼에서 티커 추출
-            # 일부 티커는 '.' 대신 '-' 사용 (예: BRK.B → BRK-B)
-            tickers = sp500_table['Symbol'].tolist()
+            # 403 Forbidden 방지를 위한 User-Agent 설정
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
             
-            # yfinance 형식으로 변환 (. → -)
-            tickers = [ticker.replace('.', '-') for ticker in tickers]
+            # HTML 다운로드
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
             
-            logger.info(f"✅ S&P500 티커 {len(tickers)}개 수집 완료")
+            # pandas로 테이블 파싱 ('Symbol' 컬럼이 있는 테이블 찾기)
+            tables = pd.read_html(io.StringIO(response.text), match='Symbol')
             
+            if not tables:
+                raise ValueError("테이블을 찾을 수 없습니다.")
+                
+            df = tables[0]
+            tickers = df['Symbol'].tolist()
+            
+            # '.' 들어간 티커 수정 (예: BRK.B -> BRK-B)
+            # yfinance는 '-' 사용
+            tickers = [t.replace('.', '-') for t in tickers]
+            
+            logger.info(f"✅ S&P500 티커 수집 완료: {len(tickers)}개")
             return tickers
             
         except Exception as e:
             logger.error(f"❌ S&P500 티커 수집 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             logger.info("대체 방법: 주요 티커 하드코딩 사용")
             
             # 대체: 주요 대형주 티커 (테스트용)

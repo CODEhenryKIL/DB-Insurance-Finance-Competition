@@ -43,7 +43,8 @@ from config.constants import (
     RANDOM_SEED,
     INPUT_DIM, OUTPUT_DIM,
     LEARNING_RATE, EPOCHS,
-    TRAIN_WINDOW_YEARS
+    TRAIN_WINDOW_YEARS,
+    BACKTEST_START_YEAR
 )
 from config.paths import CACHE_DIR
 from utils.logger import get_logger, log_dataframe_info
@@ -272,11 +273,14 @@ class RollingTrainer:
         # 2. 예측 가능한 연도 확인
         min_year = valid_df['FiscalYear'].min()
         max_year = valid_df['FiscalYear'].max()
-        first_test_year = min_year + self.train_window_years
+        
+        # 백테스트 시작 연도 (2015년 고정 - XBRL 안정화 및 m1 데이터 충분)
+        first_test_year = max(BACKTEST_START_YEAR, min_year + self.train_window_years)
         
         logger.info(f"[2단계] Rolling window 설정")
         logger.info(f"  → 데이터 범위: FY{min_year} ~ FY{max_year}")
-        logger.info(f"  → 첫 번째 Test: FY{first_test_year} (Train: FY{min_year}-FY{first_test_year-1})")
+        logger.info(f"  → 백테스트 시작: FY{first_test_year} (고정: {BACKTEST_START_YEAR})")
+        logger.info(f"  → 첫 번째 Test: FY{first_test_year} (Train: FY{first_test_year - self.train_window_years}-FY{first_test_year-1})")
         logger.info(f"  → 마지막 Test: FY{max_year}")
         
         # 3. 각 연도별 학습 및 예측
