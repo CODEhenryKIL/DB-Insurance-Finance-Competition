@@ -287,6 +287,7 @@ class RollingTrainer:
         logger.info(f"[3단계] Rolling window 학습 및 예측")
         
         all_predictions = []
+        weights_history = []  # ⭐ 가중치 히스토리 추가
         
         for test_year in range(first_test_year, max_year + 1):
             train_year_start = test_year - self.train_window_years
@@ -314,6 +315,19 @@ class RollingTrainer:
                 
                 # 모델 학습
                 model = self.train_model(X_train, y_train, verbose=False)
+                
+                # ⭐ 가중치 추출 및 기록
+                weights = model.linear.weight.detach().numpy().flatten()
+                bias = model.linear.bias.detach().numpy().item()
+                weights_history.append({
+                    'FiscalYear': test_year,
+                    'w_m1': weights[0],
+                    'w_m2': weights[1],
+                    'w_m3': weights[2],
+                    'bias': bias,
+                    'train_samples': len(train_df)
+                })
+                logger.info(f"    가중치: m1={weights[0]:.3f}, m2={weights[1]:.3f}, m3={weights[2]:.3f}")
                 
                 # 예측
                 model.eval()
@@ -354,10 +368,21 @@ class RollingTrainer:
         
         # 5. 저장
         logger.info(f"[5단계] 캐시 저장 중...")
+        
+        # 예측 결과 저장
         output_path = CACHE_DIR / 'step4_predictions.csv'
         predictions_df.to_csv(output_path)
-        logger.info(f"✅ 캐시 저장 완료")
+        logger.info(f"✅ 예측 결과 저장 완료")
         logger.info(f"  - 파일: {output_path}")
+        
+        # ⭐ 가중치 히스토리 저장
+        if weights_history:
+            weights_df = pd.DataFrame(weights_history)
+            weights_path = CACHE_DIR / 'step4_weights_history.csv'
+            weights_df.to_csv(weights_path, index=False)
+            logger.info(f"✅ 가중치 히스토리 저장 완료")
+            logger.info(f"  - 파일: {weights_path}")
+            logger.info(f"  - 연도별 가중치 변화 추적 가능")
         
         logger.info("")
         logger.info("="*60)
