@@ -31,6 +31,13 @@ TEST_TICKERS = [
     'AMZN', 'ANET', 'XYZ', 'AIZ', 'PYPL', 'TROW', 'HPQ', 'STE'
 ]
 
+# ⭐ 시장 모드
+MARKET_MODE = 'FULL'  # 'SP500' or 'FULL' (전체 미국 시장 8,410개)
+
+# ⭐ 배치 처리 설정 (FULL 모드 전용)
+BATCH_SIZE = 100  # 100개 단위로 저장
+CHECKPOINT_ENABLED = True  # 체크포인트 저장 여부
+
 # 데이터 수집 시작 연도
 # 2012년부터 수집 (m1 계산용 3년 R&D 누적 데이터 확보용)
 START_YEAR = 2012

@@ -113,15 +113,35 @@ class PriceCollector:
     
     def get_sp500_tickers(self) -> List[str]:
         """
-        Wikipedia에서 S&P 500 티커 리스트 수집
-        TEST_MODE=True이면 17개 티커만 반환
+        티커 리스트 수집
+        TEST_MODE=True: 17개 티커
+        MARKET_MODE='SP500': S&P 500 (450개)
+        MARKET_MODE='FULL': 전체 미국 시장 (8,410개)
         """
-        # ⭐ 테스트 모드 체크
+        from config.constants import TEST_MODE, TEST_TICKERS, MARKET_MODE
+        
+        # 테스트 모드
         if TEST_MODE:
             logger.info("⚠️  TEST MODE: 17개 티커만 사용")
             logger.info(f"  → 티커: {TEST_TICKERS}")
             return TEST_TICKERS
         
+        # FULL 시장 모드
+        if MARKET_MODE == 'FULL':
+            logger.info("🌍 FULL MARKET MODE: 전체 미국 시장 (8,410개)")
+            from config.paths import CACHE_DIR
+            ticker_file = CACHE_DIR / 'us_market_tickers.txt'
+            
+            if not ticker_file.exists():
+                raise FileNotFoundError(f"티커 파일 없음: {ticker_file}")
+            
+            with open(ticker_file, 'r') as f:
+                tickers = [line.strip() for line in f if line.strip()]
+            
+            logger.info(f"  → 티커 파일에서 로드: {len(tickers)}개")
+            return tickers
+        
+        # S&P 500 모드 (기본)
         logger.info("S&P500 티커 리스트 수집 중...")
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         
