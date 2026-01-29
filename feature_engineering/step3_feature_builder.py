@@ -232,13 +232,32 @@ class FeatureBuilder:
         # 1. Step2 재무 데이터 로드
         logger.info("[1단계] Step2 재무 데이터 로드")
         restated_df = pd.read_csv(STEP2_FUNDAMENTALS_CSV, index_col=0)
+        logger.info(f"  → 원본 데이터: {len(restated_df):,}행")
         
-        # ⭐ AUDIT FIX #1: RD/SGA fillna(0) - 결측치를 "데이터 없음"으로 간주
-        # R&D가 없는 기업(예: 제조업)은 0으로 처리
+        # ⭐ [수정] 2단계: 섹터 필터링 (가장 먼저!)
+        logger.info("[1.5단계] 섹터 필터링")
+        from config.constants import EXCLUDED_SECTORS
+        before_filter = len(restated_df)
+        restated_df = restated_df[~restated_df['Sector'].isin(EXCLUDED_SECTORS)]
+        after_filter = len(restated_df)
+        logger.info(f"  → 제외 섹터: {EXCLUDED_SECTORS}")
+        logger.info(f"  → 필터 후: {after_filter:,}행 ({before_filter - after_filter:,}행 제거)")
+        
+        # ⭐ [수정] 3단계: 필수 데이터 검증 (SGA, Revenue NaN → Drop)
+        logger.info("[1.6단계] 필수 데이터 검증 (SGA/Revenue)")
+        before_drop = len(restated_df)
+        restated_df = restated_df.dropna(subset=['SGA', 'Revenue'])
+        after_drop = len(restated_df)
+        logger.info(f"  → SGA/Revenue NaN 제거: {before_drop - after_drop:,}행 제거")
+        logger.info(f"  → 유효 데이터: {after_drop:,}행")
+        
+        # ⭐ [수정] 4단계: R&D만 fillna(0) (R&D 안 하는 기업 존재)
+        logger.info("[1.7단계] R&D 결측치 처리")
+        rd_missing_before = restated_df['RD'].isna().sum()
         restated_df['RD'] = restated_df['RD'].fillna(0)
-        restated_df['SGA'] = restated_df['SGA'].fillna(0)
+        logger.info(f"  → R&D 결측 {rd_missing_before:,}행 → 0으로 대체")
         
-        log_dataframe_info(logger, restated_df, "재무 데이터")
+        log_dataframe_info(logger, restated_df, "필터링 후 재무 데이터")
         
         # 2. 회계 재작성
         logger.info("[2단계] 회계 재작성 (I, A, AdjOI)")
@@ -249,7 +268,9 @@ class FeatureBuilder:
         
         # 3. Step1 가격 데이터 로드 및 MarketCap 계산
         logger.info("[3단계] MarketCap 및 PBR 계산")
-        px_close_df = pd.read_csv(CACHE_DIR / 'step1_px_close_m.csv', index_col=0, parse_dates=True)
+        px_close_df = pd.read_csv(CACHE_DIR / 'step1_px_close_m.csv', index_col=0, parse_dates=[0])
+       # ⭐ 인덱스 타입 변환 보장 (UTC로 통일)
+        px_close_df.index = pd.to_datetime(px_close_df.index, utc=True)
         logger.info(f"  → 가격 데이터: {px_close_df.shape[0]}행 × {px_close_df.shape[1]}열")
         
         # 4. FiscalYear EndDate에 가장 가까운 가격 매칭
@@ -273,7 +294,7 @@ class FeatureBuilder:
                 # ⭐ AUDIT FIX #2: Look-ahead Bias 방지
                 # 재무제표는 FiscalYear 종료 후 약 3개월 뒤 공시됨
                 # 3개월 래그 추가하여 공시 시점 근사
-                filing_date_approx = end_date + pd.DateOffset(months=3)
+                filing_date_approx = (end_date + pd.DateOffset(months=3)).tz_localize('UTC')  # ⭐ UTC 타임존 추가
                 
                 # asof() 사용: filing_date_approx 이전 가장 가까운 날짜
                 price = px_close_df[ticker].asof(filing_date_approx)
