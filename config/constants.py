@@ -62,7 +62,8 @@ EXCLUDED_SECTORS = [
     'Financials',       # GICS 40
     'Utilities',        # GICS 55
     'Energy',           # GICS 10 (추가)
-    'Materials'         # GICS 15 (추가)
+    'Materials',        # GICS 15 (추가)
+    'Real Estate'       # GICS 60 (추가)
 ]
 
 # SEC API 요청 헤더 (필수)
