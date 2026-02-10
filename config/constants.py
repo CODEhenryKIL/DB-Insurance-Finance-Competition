@@ -32,7 +32,12 @@ TEST_TICKERS = [
 ]
 
 # ⭐ 시장 모드
-MARKET_MODE = 'FULL'  # 'SP500' or 'FULL' (전체 미국 시장 8,410개)
+# 'FULL': 전체 미국 시장 (~3,640개, 현재 수집된 데이터)
+# 'SP500': S&P 500 구성종목만 (연도별 Historical Constituents 적용)
+MARKET_MODE = 'SP500'  # 'SP500' or 'FULL'
+
+# ⭐ S&P 500 티커 파일 경로
+SP500_TICKERS_FILE = 'sp500_tickers.txt'
 
 # ⭐ 배치 처리 설정 (FULL 모드 전용)
 BATCH_SIZE = 100  # 100개 단위로 저장
@@ -63,7 +68,8 @@ EXCLUDED_SECTORS = [
     'Utilities',        # GICS 55
     'Energy',           # GICS 10 (추가)
     'Materials',        # GICS 15 (추가)
-    'Real Estate'       # GICS 60 (추가)
+    'Real Estate',      # GICS 60 (추가)
+    'Unknown'           # 섹터 정보 없는 기업 제외 (v2.1.2)
 ]
 
 # SEC API 요청 헤더 (필수)
@@ -96,6 +102,11 @@ AMORTIZATION_YEARS = 3
 # 3. 모델 학습 설정
 # ===========================================
 
+# ⭐ Y 타겟 모드 (중요!)
+# 'raw': 단순 ln(PBR) - 절대적 저평가 학습
+# 'sector': 섹터 상대 ln(PBR) = ln(PBR) - Sector_Median - 섹터 내 상대 저평가 학습
+Y_TARGET_MODE = 'sector'  # 'raw' or 'sector' (권장: sector)
+
 # PyTorch 모델 입력 차원 (m1, m2, m3)
 INPUT_DIM = 3
 
@@ -103,18 +114,60 @@ INPUT_DIM = 3
 OUTPUT_DIM = 1
 
 # Adam optimizer learning rate
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-2  # 0.001 → 0.01로 상향
 
-# 학습 epoch 수
-# 작은 데이터셋이므로 500~1000 epoch 권장
-EPOCHS = 500
+# 학습 epoch 수 (Early stopping과 함께 사용)
+EPOCHS = 100  # 500 → 100으로 축소 (early stopping 적용)
+
+# Early stopping patience (val loss 개선 없으면 중단)
+EARLY_STOPPING_PATIENCE = 10
+
+# L2 규제 (weight decay)
+WEIGHT_DECAY = 1e-2  # 1e-4 → 1e-2로 강화 (강한 규제)
 
 # Rolling window 학습 기간 (년)
 # 매 리밸런스 시점에서 과거 N년 데이터로 학습
+# 5년 -> 3년으로 단축 (기술주 트렌드 반영)
 TRAIN_WINDOW_YEARS = 5
 
 # Random seed (재현성을 위해)
 RANDOM_SEED = 42
+
+
+# ===========================================
+# 3.5. RankNet 모델 설정 (Ranking Loss)
+# ===========================================
+# 
+# RankNet은 MSE 대신 Pairwise Ranking Loss를 사용
+# "누가 누구보다 더 좋은가?"를 학습
+# 
+# 장점:
+# - 극단값(Outlier)에 덜 민감
+# - 상위 20~30% 구간 예측 정확도 향상
+# - 포트폴리오 안정성 확보
+
+# RankNet Learning Rate (MSE보다 낮게)
+RANKNET_LEARNING_RATE = 5e-3
+
+# RankNet Epochs (MSE보다 높게 - 수렴 느림)
+RANKNET_EPOCHS = 300
+
+# RankNet 배치 사이즈 (N×N 메모리 고려)
+# 배치 사이즈 N이면 내부적으로 N×N 매트릭스 생성
+RANKNET_BATCH_SIZE = 128
+
+# RankNet 스케일링 파라미터 (sigma)
+RANKNET_SIGMA = 1.0
+
+# RankNet L2 규제
+RANKNET_WEIGHT_DECAY = 1e-3
+
+# RankNet Early Stopping Patience (증가)
+RANKNET_PATIENCE = 30
+
+# Rank IC 목표값 (Information Coefficient)
+# 예측 점수와 실제 수익률의 스피어만 상관계수
+RANKNET_TARGET_IC = 0.03
 
 
 # ===========================================
@@ -142,8 +195,30 @@ PRICE_CHECK_MONTHS = 12
 PRICE_THRESHOLD_DOLLARS = 5.0
 PRICE_BELOW_THRESHOLD_RATIO = 0.80
 
-# 벤치마크 티커
-BENCHMARK_TICKER = 'SPY'  # S&P500 ETF
+# ⭐ 벤치마크 연도별 수익률 (Price Return 기준, 하드코딩)
+# 출처: 표준 연도별 수익률 데이터 (Price Return 기준)
+# yfinance 동적 다운로드 방식 폐기 → 데이터 무결성 확보
+BENCHMARK_RETURNS = {
+    2012: {'S&P500': 0.1341, 'Russell1000': 0.1392, 'Russell2000': 0.1463, 'Russell3000': 0.1398, 'Wilshire5000': 0.1369},
+    2013: {'S&P500': 0.2960, 'Russell1000': 0.3044, 'Russell2000': 0.3700, 'Russell3000': 0.3095, 'Wilshire5000': 0.3142},
+    2014: {'S&P500': 0.1139, 'Russell1000': 0.1107, 'Russell2000': 0.0353, 'Russell3000': 0.1045, 'Wilshire5000': 0.0997},
+    2015: {'S&P500': -0.0073, 'Russell1000': -0.0109, 'Russell2000': -0.0571, 'Russell3000': -0.0147, 'Wilshire5000': -0.0232},
+    2016: {'S&P500': 0.0954, 'Russell1000': 0.0970, 'Russell2000': 0.1948, 'Russell3000': 0.1042, 'Wilshire5000': 0.1067},
+    2017: {'S&P500': 0.1942, 'Russell1000': 0.1934, 'Russell2000': 0.1314, 'Russell3000': 0.1885, 'Wilshire5000': 0.1865},
+    2018: {'S&P500': -0.0624, 'Russell1000': -0.0658, 'Russell2000': -0.1218, 'Russell3000': -0.0699, 'Wilshire5000': -0.0736},
+    2019: {'S&P500': 0.2888, 'Russell1000': 0.2889, 'Russell2000': 0.2372, 'Russell3000': 0.2854, 'Wilshire5000': 0.2772},
+    2020: {'S&P500': 0.1626, 'Russell1000': 0.1887, 'Russell2000': 0.1836, 'Russell3000': 0.1882, 'Wilshire5000': 0.1998},
+    2021: {'S&P500': 0.2689, 'Russell1000': 0.2476, 'Russell2000': 0.1369, 'Russell3000': 0.2400, 'Wilshire5000': 0.2282},
+    2022: {'S&P500': -0.1944, 'Russell1000': -0.2041, 'Russell2000': -0.2156, 'Russell3000': -0.2048, 'Wilshire5000': -0.2143},
+    2023: {'S&P500': 0.2423, 'Russell1000': 0.2451, 'Russell2000': 0.1509, 'Russell3000': 0.2395, 'Wilshire5000': 0.2429},
+    2024: {'S&P500': 0.2331, 'Russell1000': 0.2284, 'Russell2000': 0.1002, 'Russell3000': 0.2215, 'Wilshire5000': 0.2257}
+}
+
+# 벤치마크 지수 리스트 (비교용)
+BENCHMARK_INDICES = ['S&P500', 'Russell1000', 'Russell2000', 'Russell3000', 'Wilshire5000']
+
+# [DEPRECATED] 벤치마크 티커 (동적 다운로드용 - 더 이상 사용 안함)
+# BENCHMARK_TICKER = 'SPY'  # S&P500 ETF
 
 # 무위험 수익률 (연율)
 # Sharpe Ratio 계산 시 사용

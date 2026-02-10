@@ -56,7 +56,8 @@ from config.constants import (
 from config.paths import (
     STEP1_PRICE_ADJ_CSV,
     STEP1_PRICE_CLOSE_CSV,
-    STEP1_META_JSON
+    STEP1_META_JSON,
+    STEP0_VALID_UNIVERSE_JSON
 )
 from utils import (
     get_logger,
@@ -114,11 +115,32 @@ class PriceCollector:
     def get_sp500_tickers(self) -> List[str]:
         """
         티커 리스트 수집
-        TEST_MODE=True: 17개 티커
-        MARKET_MODE='SP500': S&P 500 (450개)
-        MARKET_MODE='FULL': 전체 미국 시장 (8,410개)
+        
+        우선순위:
+        1. Step 0 유니버스 JSON (필터링 완료된 유효 티커)
+        2. TEST_MODE=True: 테스트 티커
+        3. MARKET_MODE='SP500': S&P 500
+        4. MARKET_MODE='FULL': 전체 미국 시장
         """
+        import json
         from config.constants import TEST_MODE, TEST_TICKERS, MARKET_MODE
+        
+        # ⭐ Step 0 유니버스 JSON이 있으면 우선 사용 (필터링 완료된 데이터)
+        if STEP0_VALID_UNIVERSE_JSON.exists():
+            logger.info("📜 Step 0 유니버스 JSON에서 티커 로드")
+            with open(STEP0_VALID_UNIVERSE_JSON, 'r', encoding='utf-8') as f:
+                universe = json.load(f)
+            
+            tickers = [item['ticker'] for item in universe]
+            
+            # 섹터 정보도 미리 저장 (나중에 사용)
+            self._universe_sector_map = {item['ticker']: item['sector'] for item in universe}
+            
+            logger.info(f"  → 유효 티커 로드 완료: {len(tickers)}개")
+            logger.info(f"  → 이미 필터링됨: 금융/유틸/에너지/부동산 제외 완료")
+            return tickers
+        
+        logger.warning("⚠️  Step 0 유니버스 없음 - 레거시 모드로 동작")
         
         # 테스트 모드
         if TEST_MODE:
@@ -333,31 +355,63 @@ class PriceCollector:
         logger.info(f"  - 기간: {self.start_date} ~ {self.end_date}")
         
         try:
-            # yfinance download: 여러 티커 동시 다운로드
-            # group_by='ticker': 티커별로 컬럼 그룹화
-            # auto_adjust=False: Adj Close와 Close 모두 받기
-            # threads=True: 병렬 다운로드 (속도 향상)
-            data = yf.download(
-                tickers=tickers,
-                start=self.start_date,
-                end=self.end_date,
-                group_by='ticker',
-                auto_adjust=False,
-                threads=True,
-                progress=True  # 진행률 표시
-            )
+            # 대규모 티커의 경우 배치 처리 (스레드 한계 방지)
+            BATCH_SIZE = 500
             
-            # 단일 티커인 경우와 여러 티커인 경우 데이터 구조가 다름
-            if len(tickers) == 1:
-                # 단일 티커: MultiIndex가 아님
-                ticker = tickers[0]
-                adj_close_df = data[['Adj Close']].rename(columns={'Adj Close': ticker})
-                close_df = data[['Close']].rename(columns={'Close': ticker})
+            if len(tickers) > BATCH_SIZE:
+                logger.info(f"  - 배치 처리: {BATCH_SIZE}개씩 나눠서 다운로드")
+                all_adj_close = []
+                all_close = []
+                
+                for i in range(0, len(tickers), BATCH_SIZE):
+                    batch = tickers[i:i + BATCH_SIZE]
+                    batch_num = i // BATCH_SIZE + 1
+                    total_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
+                    logger.info(f"  → 배치 {batch_num}/{total_batches}: {len(batch)}개 티커")
+                    
+                    data = yf.download(
+                        tickers=batch,
+                        start=self.start_date,
+                        end=self.end_date,
+                        group_by='ticker',
+                        auto_adjust=False,
+                        threads=8,  # 스레드 수 제한
+                        progress=True
+                    )
+                    
+                    if len(batch) == 1:
+                        ticker = batch[0]
+                        batch_adj = data[['Adj Close']].rename(columns={'Adj Close': ticker})
+                        batch_close = data[['Close']].rename(columns={'Close': ticker})
+                    else:
+                        batch_adj = data.xs('Adj Close', axis=1, level=1)
+                        batch_close = data.xs('Close', axis=1, level=1)
+                    
+                    all_adj_close.append(batch_adj)
+                    all_close.append(batch_close)
+                
+                # 모든 배치 병합
+                adj_close_df = pd.concat(all_adj_close, axis=1)
+                close_df = pd.concat(all_close, axis=1)
             else:
-                # 여러 티커: MultiIndex (ticker, field)
-                # 'Adj Close'와 'Close' 추출
-                adj_close_df = data.xs('Adj Close', axis=1, level=1)
-                close_df = data.xs('Close', axis=1, level=1)
+                # 작은 규모: 기존 로직
+                data = yf.download(
+                    tickers=tickers,
+                    start=self.start_date,
+                    end=self.end_date,
+                    group_by='ticker',
+                    auto_adjust=False,
+                    threads=8,  # 스레드 수 제한
+                    progress=True
+                )
+                
+                if len(tickers) == 1:
+                    ticker = tickers[0]
+                    adj_close_df = data[['Adj Close']].rename(columns={'Adj Close': ticker})
+                    close_df = data[['Close']].rename(columns={'Close': ticker})
+                else:
+                    adj_close_df = data.xs('Adj Close', axis=1, level=1)
+                    close_df = data.xs('Close', axis=1, level=1)
             
             logger.info(f"✅ 일별 가격 데이터 수집 완료")
             log_dataframe_info(logger, adj_close_df, "조정종가")
@@ -461,9 +515,9 @@ class PriceCollector:
         전체 파이프라인을 실행합니다.
         
         실행 순서:
-        1. S&P500 티커 리스트 수집
-        2. 섹터 정보 수집
-        3. 섹터 필터링
+        1. 티커 리스트 수집 (Step 0 유니버스 우선)
+        2. 섹터 정보 수집 (Step 0 사용 시 스킵)
+        3. 섹터 필터링 (Step 0 사용 시 스킵)
         4. 일별 가격 데이터 수집
         5. 월말 데이터로 리샘플링
         6. 캐시 저장
@@ -474,14 +528,26 @@ class PriceCollector:
         """
         log_section_header(logger, "Step1: 가격 데이터 수집 시작")
         
-        # 1. S&P500 티커 수집
+        # 1. 티커 수집
         tickers = self.get_sp500_tickers()
         
-        # 2. 섹터 정보 수집
-        sector_map = self.get_sector_info(tickers)
+        # ⭐ Step 0 유니버스를 사용했는지 확인
+        use_step0_universe = hasattr(self, '_universe_sector_map') and self._universe_sector_map
         
-        # 3. 섹터 필터링
-        filtered_tickers, filtered_sector_map = self.filter_by_sector(sector_map)
+        if use_step0_universe:
+            # Step 0에서 이미 필터링됨 → 섹터 수집/필터링 스킵
+            logger.info("✅ Step 0 유니버스 사용 - 섹터 필터링 스킵")
+            filtered_tickers = tickers
+            filtered_sector_map = self._universe_sector_map
+        else:
+            # 레거시 모드: 직접 섹터 수집 및 필터링
+            logger.info("⚠️ 레거시 모드 - 섹터 수집 및 필터링 직접 수행")
+            
+            # 2. 섹터 정보 수집
+            sector_map = self.get_sector_info(tickers)
+            
+            # 3. 섹터 필터링
+            filtered_tickers, filtered_sector_map = self.filter_by_sector(sector_map)
         
         # 4. 일별 가격 수집
         adj_daily, close_daily = self.collect_daily_prices(filtered_tickers)

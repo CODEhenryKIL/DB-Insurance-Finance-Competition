@@ -229,9 +229,29 @@ class FeatureBuilder:
         logger.info("  Step3: Feature Engineering 시작")
         logger.info("="*60)
         
-        # 1. Step2 재무 데이터 로드
+        # 0. MARKET_MODE 확인
+        from config.constants import MARKET_MODE
+        logger.info(f"[0단계] MARKET_MODE: {MARKET_MODE}")
+        
+        # 1. Step2 재무 데이터 로드 (MARKET_MODE에 따라 다른 파일)
         logger.info("[1단계] Step2 재무 데이터 로드")
-        restated_df = pd.read_csv(STEP2_FUNDAMENTALS_CSV, index_col=0)
+        
+        if MARKET_MODE == 'SP500':
+            # S&P 500 전용 데이터 (연도별 Historical Constituents 적용됨)
+            sp500_file = CACHE_DIR / 'step2_fund_annual_sp500.csv'
+            if sp500_file.exists():
+                restated_df = pd.read_csv(sp500_file, index_col=0)
+                logger.info(f"  → S&P 500 전용 데이터 로드: {sp500_file.name}")
+                logger.info(f"  → 데이터: {len(restated_df):,}행, {restated_df['Ticker'].nunique()}개 티커")
+            else:
+                logger.error(f"  ❌ S&P 500 데이터 파일 없음: {sp500_file}")
+                logger.error(f"     먼저 실행: python scripts/build_sp500_historical.py")
+                raise FileNotFoundError(f"S&P 500 데이터 파일 없음: {sp500_file}")
+        else:
+            # FULL 모드: 기존 전체 데이터
+            restated_df = pd.read_csv(STEP2_FUNDAMENTALS_CSV, index_col=0)
+            logger.info(f"  → 전체 시장 데이터 로드: {STEP2_FUNDAMENTALS_CSV.name}")
+        
         logger.info(f"  → 원본 데이터: {len(restated_df):,}행")
         
         # ⭐ [수정] 2단계: 섹터 필터링 (가장 먼저!)
@@ -360,12 +380,200 @@ class FeatureBuilder:
         logger.info(f"✅ 캐시 저장 완료")
         logger.info(f"  - 파일: {output_path}")
         
+        # ⭐ Step 3.5: 유니버스 리포트 생성
+        logger.info("")
+        logger.info("="*60)
+        logger.info("  Step 3.5: 유니버스 리포트 생성")
+        logger.info("="*60)
+        self.generate_universe_report(features_df)
+        
         logger.info("")
         logger.info("="*60)
         logger.info("  Step3: Feature Engineering 완료")
         logger.info("="*60)
         
         return features_df
+    
+    def generate_universe_report(self, features_df: pd.DataFrame) -> None:
+        """
+        Step 3.5: 유니버스 리포트 생성 (Excel)
+        
+        모델 학습 전 데이터 품질 점검용 리포트
+        
+        Parameters
+        ----------
+        features_df : DataFrame
+            Step3 피처 데이터
+        """
+        from config.paths import UNIVERSE_REPORT_XLSX, REPORTS_DIR
+        
+        # 리포트 디렉토리 생성
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        
+        logger.info("유니버스 리포트 생성 중...")
+        
+        # 1. Details Sheet: 티커별 데이터 상태
+        details_data = []
+        
+        for ticker, group in features_df.groupby('Ticker'):
+            group = group.sort_values('FiscalYear')
+            
+            start_year = group['FiscalYear'].min()
+            end_year = group['FiscalYear'].max()
+            count_rows = len(group)
+            
+            # R&D 데이터 유무 확인
+            # Investment 컬럼이 있고 0이 아닌 값이 있으면 R&D 존재
+            has_rd = False
+            if 'Investment' in group.columns:
+                has_rd = (group['Investment'] > 0).any()
+            
+            # m1, m2, m3, y 유효 데이터 수
+            valid_m1 = group['m1'].notna().sum()
+            valid_m2 = group['m2'].notna().sum()
+            valid_m3 = group['m3'].notna().sum()
+            valid_y = group['y'].notna().sum()
+            
+            # 상태 판정
+            # 최소 3년 데이터 + m2 2개 이상 필요
+            if count_rows >= 3 and valid_m2 >= 2 and valid_y >= 2:
+                status = 'Ready'
+            else:
+                status = 'Insufficient Data'
+            
+            sector = group['Sector'].iloc[0] if 'Sector' in group.columns else 'Unknown'
+            
+            details_data.append({
+                'Ticker': ticker,
+                'Sector': sector,
+                'Start_Year': int(start_year),
+                'End_Year': int(end_year),
+                'Count_Rows': count_rows,
+                'Missing_R&D': not has_rd,
+                'Valid_m1': valid_m1,
+                'Valid_m2': valid_m2,
+                'Valid_m3': valid_m3,
+                'Valid_y': valid_y,
+                'Status': status
+            })
+        
+        details_df = pd.DataFrame(details_data)
+        
+        # 2. Missing Years Sheet: 기업별 누락 연도 상세
+        logger.info("  기업별 누락 연도 분석 중...")
+        missing_years_data = []
+        
+        # 전체 연도 범위 (2012 ~ 최신)
+        all_years = set(range(2012, features_df['FiscalYear'].max() + 1))
+        
+        for ticker, group in features_df.groupby('Ticker'):
+            group = group.sort_values('FiscalYear')
+            existing_years = set(group['FiscalYear'].unique())
+            
+            start_year = group['FiscalYear'].min()
+            end_year = group['FiscalYear'].max()
+            
+            # 해당 기업의 예상 연도 범위 내 누락
+            expected_years = set(range(int(start_year), int(end_year) + 1))
+            missing_in_range = sorted(expected_years - existing_years)
+            
+            # 각 피처별 누락 연도
+            m1_missing = sorted(group[group['m1'].isna()]['FiscalYear'].tolist())
+            m2_missing = sorted(group[group['m2'].isna()]['FiscalYear'].tolist())
+            m3_missing = sorted(group[group['m3'].isna()]['FiscalYear'].tolist())
+            y_missing = sorted(group[group['y'].isna()]['FiscalYear'].tolist())
+            
+            sector = group['Sector'].iloc[0] if 'Sector' in group.columns else 'Unknown'
+            
+            # 누락이 있는 경우만 기록 (또는 모든 기업 기록)
+            if missing_in_range or m1_missing or m2_missing or m3_missing or y_missing:
+                missing_years_data.append({
+                    'Ticker': ticker,
+                    'Sector': sector,
+                    'Data_Years': f"{int(start_year)}-{int(end_year)}",
+                    'Total_Rows': len(group),
+                    'Missing_Years_in_Range': ', '.join(map(str, missing_in_range)) if missing_in_range else '-',
+                    'm1_NaN_Years': ', '.join(map(str, [int(y) for y in m1_missing])) if m1_missing else '-',
+                    'm2_NaN_Years': ', '.join(map(str, [int(y) for y in m2_missing])) if m2_missing else '-',
+                    'm3_NaN_Years': ', '.join(map(str, [int(y) for y in m3_missing])) if m3_missing else '-',
+                    'y_NaN_Years': ', '.join(map(str, [int(y) for y in y_missing])) if y_missing else '-',
+                    'Total_NaN_Count': len(m1_missing) + len(m2_missing) + len(m3_missing) + len(y_missing)
+                })
+        
+        missing_years_df = pd.DataFrame(missing_years_data)
+        if len(missing_years_df) > 0:
+            missing_years_df = missing_years_df.sort_values('Total_NaN_Count', ascending=False)
+        
+        # 3. Summary Sheet: 전체 통계
+        total_tickers = len(details_df)
+        ready_tickers = (details_df['Status'] == 'Ready').sum()
+        insufficient_tickers = (details_df['Status'] == 'Insufficient Data').sum()
+        
+        # 섹터별 통계
+        sector_summary = details_df.groupby('Sector').agg({
+            'Ticker': 'count',
+            'Status': lambda x: (x == 'Ready').sum()
+        }).rename(columns={'Ticker': 'Total', 'Status': 'Ready'})
+        sector_summary['Ready_Pct'] = (sector_summary['Ready'] / sector_summary['Total'] * 100).round(1)
+        
+        summary_data = {
+            'Metric': [
+                'Total Tickers',
+                'Ready for Training',
+                'Insufficient Data',
+                'Ready Rate (%)',
+                'Avg Years per Ticker',
+                'Total Data Points',
+                'Missing R&D Rate (%)',
+                'Tickers with Missing Data',
+                'Data Period'
+            ],
+            'Value': [
+                total_tickers,
+                ready_tickers,
+                insufficient_tickers,
+                round(ready_tickers / total_tickers * 100, 1) if total_tickers > 0 else 0,
+                round(details_df['Count_Rows'].mean(), 1),
+                details_df['Count_Rows'].sum(),
+                round(details_df['Missing_R&D'].sum() / total_tickers * 100, 1) if total_tickers > 0 else 0,
+                len(missing_years_df),
+                f"2012-{features_df['FiscalYear'].max()}"
+            ]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        
+        # 4. Excel 저장 (openpyxl 사용)
+        try:
+            with pd.ExcelWriter(UNIVERSE_REPORT_XLSX, engine='openpyxl') as writer:
+                # Summary 시트
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Sector Summary 시트
+                sector_summary.to_excel(writer, sheet_name='Sector_Summary')
+                
+                # Details 시트 (전체 기업)
+                details_df.to_excel(writer, sheet_name='Ticker_Details', index=False)
+                
+                # Missing Years 시트 (누락 상세)
+                if len(missing_years_df) > 0:
+                    missing_years_df.to_excel(writer, sheet_name='Missing_Years_Detail', index=False)
+            
+            logger.info(f"✅ 유니버스 리포트 저장 완료")
+            logger.info(f"  - 파일: {UNIVERSE_REPORT_XLSX}")
+            logger.info(f"  - 총 티커: {total_tickers}개")
+            logger.info(f"  - Ready: {ready_tickers}개 ({ready_tickers/total_tickers*100:.1f}%)")
+            logger.info(f"  - Insufficient: {insufficient_tickers}개")
+            
+            # 섹터별 요약 출력
+            logger.info("")
+            logger.info("  [섹터별 분포]")
+            for sector in sector_summary.index:
+                row = sector_summary.loc[sector]
+                logger.info(f"    {sector:25s}: {int(row['Total']):4d}개 (Ready: {int(row['Ready'])}개, {row['Ready_Pct']:.1f}%)")
+                
+        except Exception as e:
+            logger.error(f"❌ 리포트 저장 실패: {e}")
+            logger.warning("openpyxl이 설치되어 있는지 확인하세요: pip install openpyxl")
 
 
 # ===========================================

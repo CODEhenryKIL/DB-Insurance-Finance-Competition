@@ -40,11 +40,12 @@ from config.constants import (
     PRICE_THRESHOLD_DOLLARS,
     PRICE_BELOW_THRESHOLD_RATIO,
     PRICE_CHECK_MONTHS,
-    BENCHMARK_TICKER,
+    BENCHMARK_RETURNS,
+    BENCHMARK_INDICES,
     RISK_FREE_RATE,
     EXCLUDED_SECTORS
 )
-from config.paths import CACHE_DIR
+from config.paths import CACHE_DIR, REPORTS_DIR
 from utils.logger import get_logger
 from backtesting.metrics import (
     calculate_performance_metrics,
@@ -91,71 +92,58 @@ class PortfolioBacktester:
         self.holding_months = holding_months
         self.rebalance_month = rebalance_month
         
+        # ⭐ 포트폴리오 히스토리 저장용 (Step 5.5)
+        self.portfolio_history = {}  # {ratio: [{year, tickers, gaps, ...}, ...]}
+        
         logger.info("PortfolioBacktester 초기화 완료")
         logger.info(f"  - 롱 비율: {long_ratios}")
         logger.info(f"  - 홀딩 기간: {holding_months}개월")
         logger.info(f"  - 리밸런싱: 매년 {rebalance_month}월")
+        logger.info(f"  - 벤치마크: {BENCHMARK_INDICES} (하드코딩 Price Return)")
     
-    def download_benchmark_data(
-        self,
-        start_date: str = '2010-01-01',
-        end_date: str = None
-    ) -> pd.Series:
+    def get_benchmark_returns(self, year: int) -> dict:
         """
-        S&P 500 벤치마크 데이터 다운로드
-        """
-        logger.info(f"[벤치마크] S&P 500 ({BENCHMARK_TICKER}) 다운로드 시작")
+        특정 연도의 벤치마크 수익률 조회 (하드코딩 데이터)
         
-        try:
-            import yfinance as yf
-            
-            # yfinance 다운로드 (period='max'로 충분한 데이터 확보)
-            benchmark_data = yf.download(
-                BENCHMARK_TICKER, 
-                period="max", 
-                progress=False,
-                auto_adjust=False
-            )
-            
-            if benchmark_data.empty:
-                logger.error(f"[벤치마크] 데이터 다운로드 실패 (Empty DataFrame)")
-                return pd.Series(dtype=float)
-            
-            # 가격 컬럼 추출 (Adj Close 우선)
-            price_col = None
-            
-            # MultiIndex 처리 (최신 yfinance)
-            if isinstance(benchmark_data.columns, pd.MultiIndex):
-                if 'Adj Close' in benchmark_data.columns.get_level_values(0):
-                    price_col = benchmark_data['Adj Close']
-                elif 'Close' in benchmark_data.columns.get_level_values(0):
-                    price_col = benchmark_data['Close']
-            else:
-                if 'Adj Close' in benchmark_data.columns:
-                    price_col = benchmark_data['Adj Close']
-                elif 'Close' in benchmark_data.columns:
-                    price_col = benchmark_data['Close']
-            
-            # 여전히 못 찾았으면 첫 번째 컬럼 사용
-            if price_col is None:
-                price_col = benchmark_data.iloc[:, 0]
-                
-            # Series인지 DataFrame인지 확인 (DataFrame이면 squeeze)
-            if isinstance(price_col, pd.DataFrame):
-                price_col = price_col.iloc[:, 0]
-
-            # 월말 종가로 리샘플링 (pandas 최신 버전: 'M' -> 'ME')
-            price_col = price_col.sort_index()
-            benchmark_monthly_prices = price_col.resample('ME').last()
-            
-            logger.info(f"[벤치마크] 다운로드 완료: {len(benchmark_monthly_prices)}개월 데이터")
-            return benchmark_monthly_prices
-            
-        except Exception as e:
-            logger.error(f"[벤치마크] 오류 발생: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return pd.Series(dtype=float)
+        Parameters
+        ----------
+        year : int
+            조회할 연도 (리밸런싱 연도)
+        
+        Returns
+        -------
+        dict
+            각 벤치마크 지수별 수익률
+            {'S&P500': 0.1341, 'Russell1000': 0.1392, ...}
+        """
+        # 리밸런싱은 year년 12월에 하고, year+1년 수익률을 측정
+        return_year = year + 1
+        
+        if return_year in BENCHMARK_RETURNS:
+            return BENCHMARK_RETURNS[return_year]
+        else:
+            logger.warning(f"  ⚠️ {return_year}년 벤치마크 데이터 없음 (기본값 0% 사용)")
+            return {idx: 0.0 for idx in BENCHMARK_INDICES}
+    
+    # ============================================
+    # [DEPRECATED] 동적 다운로드 방식 - 더 이상 사용 안함
+    # ============================================
+    # def download_benchmark_data(
+    #     self,
+    #     start_date: str = '2010-01-01',
+    #     end_date: str = None
+    # ) -> pd.Series:
+    #     """
+    #     S&P 500 벤치마크 데이터 다운로드
+    #     
+    #     ⚠️ DEPRECATED: yfinance 동적 다운로드 방식 폐기
+    #     - 배당 포함 여부(Total Return vs Price Return) 불명확
+    #     - 리밸런싱 시점 매칭 문제
+    #     - 데이터 무결성 이슈
+    #     
+    #     → 대신 BENCHMARK_RETURNS 하드코딩 데이터 사용
+    #     """
+    #     pass
     
     def apply_dollar_five_rule(
         self,
@@ -270,7 +258,7 @@ class PortfolioBacktester:
         """
         전체 백테스트 파이프라인
         
-        1. Step4 predictions 로드
+        1. Step4 predictions 로드 (Gap 컬럼 사용)
         2. Step1 가격 데이터 로드
         3. 각 연도별로:
            a. Gap 기준 정렬
@@ -294,24 +282,31 @@ class PortfolioBacktester:
         logger.info("[1단계] Step4 predictions 로드")
         predictions_df = pd.read_csv(CACHE_DIR / 'step4_predictions.csv', index_col=0)
         logger.info(f"  → Predictions: {len(predictions_df)}개")
+        logger.info(f"  → Gap 통계: 평균 {predictions_df['Gap'].mean():.4f}, 표준편차 {predictions_df['Gap'].std():.4f}")
+        
+        # 1.5 Step3 features 로드 (MarketCap 정보)
+        logger.info("[1.5단계] Step3 features 로드 (MarketCap)")
+        features_df = pd.read_csv(CACHE_DIR / 'step3_features_annual.csv', index_col=0)
+        
+        # MarketCap 병합
+        predictions_df = predictions_df.merge(
+            features_df[['Ticker', 'FiscalYear', 'MarketCap']],
+            on=['Ticker', 'FiscalYear'],
+            how='left'
+        )
+        logger.info(f"  → MarketCap 병합 완료 (결측: {predictions_df['MarketCap'].isna().sum()}개)")
         
         # 2. Step1 가격 데이터 로드
         logger.info("[2단계] Step1 가격 데이터 로드")
-        price_df = pd.read_csv(CACHE_DIR / 'step1_px_close_m.csv', index_col=0, parse_dates=True)
+        price_df = pd.read_csv(CACHE_DIR / 'step1_px_close_m.csv', index_col=0, parse_dates=[0])
+        price_df.index = pd.to_datetime(price_df.index, utc=True)
+        price_df.index = price_df.index.normalize()
         logger.info(f"  → 가격 데이터: {price_df.shape[0]}행 × {price_df.shape[1]}열")
         
-        # 2.5. ⭐ 벤치마크 데이터 다운로드
-        logger.info("[2.5단계] 벤치마크 (S&P 500) 다운로드")
-        benchmark_prices = self.download_benchmark_data()
-        
-        # 벤치마크 데이터 검증
-        if len(benchmark_prices) == 0:
-            logger.error("  ❌ 벤치마크 데이터 다운로드 실패")
-            logger.error("  → Alpha/Beta 계산 불가, 더미 벤치마크 사용")
-            benchmark_prices = None
-        else:
-            logger.info(f"  ✅ 벤치마크 데이터 로드 완료: {len(benchmark_prices)}개월")
-            logger.info(f"  → 기간: {benchmark_prices.index[0].strftime('%Y-%m')} ~ {benchmark_prices.index[-1].strftime('%Y-%m')}")
+        # 2.5. 벤치마크 데이터 (하드코딩 Price Return 사용)
+        logger.info("[2.5단계] 벤치마크 데이터 로드 (하드코딩 Price Return)")
+        logger.info(f"  → 벤치마크 지수: {BENCHMARK_INDICES}")
+        logger.info(f"  → 데이터 연도: {min(BENCHMARK_RETURNS.keys())} ~ {max(BENCHMARK_RETURNS.keys())}")
         
         # 3. 리밸런싱 연도 확인
         rebalance_years = sorted(predictions_df['FiscalYear'].unique())
@@ -322,6 +317,7 @@ class PortfolioBacktester:
         logger.info(f"[4단계] 백테스트 실행 ({len(self.long_ratios)}가지 비율)")
         
         all_results = {}
+        self.portfolio_history = {}
         
         for ratio in self.long_ratios:
             logger.info(f"\n  === 롱 비율: {ratio*100:.0f}% ===")
@@ -329,32 +325,25 @@ class PortfolioBacktester:
             yearly_results = []
             
             for year in rebalance_years:
-                logger.info(f"\n    FY{year} 리밸런싱:")
-                
                 # 해당 연도 predictions
                 year_df = predictions_df[predictions_df['FiscalYear'] == year].copy()
                 
                 # Gap 기준 정렬 (내림차순)
                 year_df = year_df.sort_values('Gap', ascending=False)
                 
-                logger.info(f"      후보 개수: {len(year_df)}")
-                
-                # 리밸런싱 시점 (FY 종료 = 12월 말 근처)
-                # 간소화: FY{year} 12월 말로 가정
-                rebalance_date = pd.Timestamp(f'{year}-12-31')
+                # 리밸런싱 시점
+                rebalance_date = pd.Timestamp(f'{year}-12-31').tz_localize('UTC')
                 
                 # $5 룰 적용
                 all_tickers = year_df['Ticker'].tolist()
                 valid_tickers = self.apply_dollar_five_rule(all_tickers, rebalance_date, price_df)
                 
-                logger.info(f"      $5 룰 통과: {len(valid_tickers)}/{len(all_tickers)}")
-                
                 # 상위 N% 선택
                 n_select = max(1, int(len(valid_tickers) * ratio))
                 selected_tickers = [t for t in year_df['Ticker'] if t in valid_tickers][:n_select]
                 
-                logger.info(f"      선택: {len(selected_tickers)}개 티커")
-                logger.info(f"      티커: {', '.join(selected_tickers)}")
+                # 선택된 티커의 Gap 정보
+                selected_gaps = year_df[year_df['Ticker'].isin(selected_tickers)][['Ticker', 'Gap', 'y', 'yhat']].to_dict('records')
                 
                 # 수익률 계산
                 portfolio_return = self.calculate_portfolio_return(
@@ -363,226 +352,213 @@ class PortfolioBacktester:
                     price_df
                 )
                 
-                logger.info(f"      수익률: {portfolio_return*100:.2f}%")
+                logger.debug(f"    FY{year}: {len(selected_tickers)}개 선택, 수익률 {portfolio_return*100:.2f}%")
                 
                 yearly_results.append({
                     'Year': year,
                     'N_Candidates': len(year_df),
-                    'N_Valid': len(valid_tickers),
                     'N_Selected': len(selected_tickers),
-                    'Portfolio_Return': portfolio_return
+                    'Portfolio_Return': portfolio_return,
+                    '_selected_tickers': selected_tickers,
+                    '_selected_gaps': selected_gaps
                 })
             
-            # DataFrame으로 변환
+            # DataFrame 변환
             results_df = pd.DataFrame(yearly_results)
-            all_results[ratio] = results_df
+            all_results[f'Gap_{ratio*100:.0f}%'] = results_df
             
-            # 요약 통계
-            logger.info(f"\n  [요약 - {ratio*100:.0f}%]")
-            logger.info(f"    평균 수익률: {results_df['Portfolio_Return'].mean()*100:.2f}%")
-            logger.info(f"    표준편차: {results_df['Portfolio_Return'].std()*100:.2f}%")
-            logger.info(f"    최고: {results_df['Portfolio_Return'].max()*100:.2f}%")
-            logger.info(f"    최저: {results_df['Portfolio_Return'].min()*100:.2f}%")
+            # 포트폴리오 히스토리 저장
+            self.portfolio_history[ratio] = [
+                {
+                    'year': r['Year'],
+                    'tickers': r['_selected_tickers'],
+                    'gaps': r['_selected_gaps'],
+                    'return': r['Portfolio_Return']
+                }
+                for r in yearly_results
+            ]
+            
+            logger.info(f"  [Gap {ratio*100:.0f}%] 평균 수익률: {results_df['Portfolio_Return'].mean()*100:.2f}%")
         
-        # 5. ⭐ 벤치마크 수익률 계산
-        logger.info(f"\n[5단계] 벤치마크 수익률 계산")
+        # 4.5 소형주 전략 (시가총액 하위 50% 내에서 Gap 상위 N%)
+        logger.info(f"\n[4.5단계] 소형주 (SmallCap) 전략 실행")
         
-        benchmark_annual_returns = []
-        universe_annual_returns = []  # ⭐ 개선 3: Equal-Weighted
+        smallcap_ratios = [0.05, 0.10, 0.20]  # SmallCap 비율
         
-        if benchmark_prices is not None:
+        for ratio in smallcap_ratios:
+            logger.info(f"\n  === SmallCap 롱 비율: {ratio*100:.0f}% ===")
+            
+            yearly_results = []
+            
             for year in rebalance_years:
-                buy_date = pd.Timestamp(f'{year}-12-31')
-                sell_date = buy_date + pd.DateOffset(months=12)
+                # 해당 연도 predictions (MarketCap 포함)
+                year_df = predictions_df[predictions_df['FiscalYear'] == year].copy()
                 
-                # S&P 500 벤치마크 (날짜 매칭 개선)
-                try:
-                    # 정확한 날짜 매칭 시도
-                    if buy_date in benchmark_prices.index and sell_date in benchmark_prices.index:
-                        buy_price = benchmark_prices.loc[buy_date]
-                        sell_price = benchmark_prices.loc[sell_date]
-                    else:
-                        # Nearest date 사용 (asof)
-                        buy_price = benchmark_prices.asof(buy_date)
-                        sell_price = benchmark_prices.asof(sell_date)
-                        
-                        if pd.isna(buy_price) or pd.isna(sell_price):
-                            raise ValueError(f"No benchmark data for FY{year}")
-                    
-                    bench_return = (sell_price - buy_price) / buy_price
-                    benchmark_annual_returns.append(bench_return)
-                    
-                except Exception as e:
-                    logger.warning(f"  FY{year} 벤치마크 수익률 계산 실패: {e}")
-                    logger.warning(f"  → 해당 연도는 10% 사용")
-                    benchmark_annual_returns.append(0.10)
+                # MarketCap 유효한 기업만
+                year_df = year_df.dropna(subset=['MarketCap'])
                 
-                # ⭐ Equal-Weighted 유니버스 벤치마크
-                universe_tickers = predictions_df[predictions_df['FiscalYear'] == year]['Ticker'].unique()
+                if len(year_df) == 0:
+                    logger.warning(f"    FY{year}: MarketCap 데이터 없음 (스킵)")
+                    yearly_results.append({
+                        'Year': year,
+                        'N_Candidates': 0,
+                        'N_Selected': 0,
+                        'Portfolio_Return': 0.0,
+                        '_selected_tickers': [],
+                        '_selected_gaps': []
+                    })
+                    continue
                 
-                if len(universe_tickers) > 0 and buy_date in price_df.index and sell_date in price_df.index:
-                    returns_list = []
-                    for ticker in universe_tickers:
-                        if ticker in price_df.columns:
-                            buy_px = price_df.loc[buy_date, ticker]
-                            sell_px = price_df.loc[sell_date, ticker]
-                            if pd.notna(buy_px) and pd.notna(sell_px) and buy_px > 0:
-                                ret = (sell_px - buy_px) / buy_px
-                                returns_list.append(ret)
-                    
-                    if len(returns_list) > 0:
-                        universe_return = np.mean(returns_list)
-                        universe_annual_returns.append(universe_return)
-                        logger.debug(f"  FY{year} Equal-Weighted: {len(returns_list)}개 종목, {universe_return*100:.2f}%")
-                    else:
-                        universe_annual_returns.append(0.10)
-                else:
-                    universe_annual_returns.append(0.10)
+                # 시가총액 중앙값 계산
+                median_marketcap = year_df['MarketCap'].median()
+                
+                # 시가총액 하위 50% (소형주)
+                smallcap_df = year_df[year_df['MarketCap'] <= median_marketcap].copy()
+                
+                # Gap 기준 정렬 (내림차순)
+                smallcap_df = smallcap_df.sort_values('Gap', ascending=False)
+                
+                # 리밸런싱 시점
+                rebalance_date = pd.Timestamp(f'{year}-12-31').tz_localize('UTC')
+                
+                # $5 룰 적용
+                all_tickers = smallcap_df['Ticker'].tolist()
+                valid_tickers = self.apply_dollar_five_rule(all_tickers, rebalance_date, price_df)
+                
+                # 상위 N% 선택 (소형주 내에서)
+                n_select = max(1, int(len(valid_tickers) * ratio))
+                selected_tickers = [t for t in smallcap_df['Ticker'] if t in valid_tickers][:n_select]
+                
+                # 선택된 티커의 Gap 정보
+                selected_gaps = smallcap_df[smallcap_df['Ticker'].isin(selected_tickers)][['Ticker', 'Gap', 'y', 'yhat']].to_dict('records')
+                
+                # 수익률 계산
+                portfolio_return = self.calculate_portfolio_return(
+                    selected_tickers,
+                    rebalance_date,
+                    price_df
+                )
+                
+                logger.debug(f"    FY{year}: 소형주 {len(smallcap_df)}개 중 {len(selected_tickers)}개 선택, 수익률 {portfolio_return*100:.2f}%")
+                
+                yearly_results.append({
+                    'Year': year,
+                    'N_Candidates': len(smallcap_df),
+                    'N_Selected': len(selected_tickers),
+                    'Portfolio_Return': portfolio_return,
+                    '_selected_tickers': selected_tickers,
+                    '_selected_gaps': selected_gaps
+                })
             
-            benchmark_returns = pd.Series(benchmark_annual_returns)
-            universe_returns = pd.Series(universe_annual_returns)
-            logger.info(f"  → S&P 500 벤치마크 수익률 계산 완료: {len(benchmark_returns)}개")
-            logger.info(f"  → Equal-Weighted 유니버스 수익률 계산 완료: {len(universe_returns)}개")
-        else:
-            # 더미 벤치마크 (10%)
-            benchmark_returns = pd.Series([0.10] * len(rebalance_years))
-            universe_returns = pd.Series([0.10] * len(rebalance_years))
-            logger.warning("  → 더미 벤치마크 사용 (10%)")
+            # DataFrame 변환
+            results_df = pd.DataFrame(yearly_results)
+            all_results[f'SmallCap_{ratio*100:.0f}%'] = results_df
+            
+            # 포트폴리오 히스토리 저장
+            self.portfolio_history[f'SmallCap_{ratio}'] = [
+                {
+                    'year': r['Year'],
+                    'tickers': r['_selected_tickers'],
+                    'gaps': r['_selected_gaps'],
+                    'return': r['Portfolio_Return']
+                }
+                for r in yearly_results
+            ]
+            
+            logger.info(f"  [SmallCap {ratio*100:.0f}%] 평균 수익률: {results_df['Portfolio_Return'].mean()*100:.2f}%")
         
-        # 6. 성과 지표 계산
-        logger.info(f"\n[6단계] 성과 지표 계산")
+        # 5. 벤치마크 수익률 계산 (하드코딩 데이터 사용)
+        logger.info(f"\n[5단계] 벤치마크 수익률 계산 (하드코딩 Price Return)")
+        
+        # 각 벤치마크 지수별 연도별 수익률 저장
+        benchmark_returns_by_index = {idx: [] for idx in BENCHMARK_INDICES}
+        
+        for year in rebalance_years:
+            bench_data = self.get_benchmark_returns(year)
+            for idx in BENCHMARK_INDICES:
+                benchmark_returns_by_index[idx].append(bench_data.get(idx, 0.0))
+        
+        # S&P 500을 기본 벤치마크로 사용 (성과 지표 계산용)
+        benchmark_returns = pd.Series(benchmark_returns_by_index['S&P500'])
+        
+        logger.info(f"  → 리밸런싱 연도: {rebalance_years}")
+        logger.info(f"  → S&P 500 평균: {benchmark_returns.mean()*100:.2f}%")
+        logger.info(f"  → Russell 2000 평균: {np.mean(benchmark_returns_by_index['Russell2000'])*100:.2f}%")
+        
+        # 6. 성과 지표 계산 (5개 벤치마크 대비)
+        logger.info(f"\n[6단계] 성과 지표 계산 (5개 벤치마크 대비)")
         
         performance_summary = []
         
-        for ratio, results_df in all_results.items():
+        for ratio_key, results_df in all_results.items():
+            # S&P 500 기준 메인 지표
             metrics = calculate_performance_metrics(
                 results_df['Portfolio_Return'],
                 benchmark_returns,
                 risk_free_rate=RISK_FREE_RATE
             )
             
-            # ⭐ Information Ratio 추가
             ir = calculate_information_ratio(
                 results_df['Portfolio_Return'],
                 benchmark_returns,
-                periods_per_year=1  # 연간 데이터
+                periods_per_year=1
             )
             metrics['Information_Ratio'] = ir
+            metrics['Long_Ratio'] = ratio_key
             
-            metrics['Long_Ratio'] = ratio
+            # ⭐ 각 벤치마크 대비 Alpha 추가 계산
+            portfolio_returns = results_df['Portfolio_Return'].values
+            for idx in BENCHMARK_INDICES:
+                idx_returns = np.array(benchmark_returns_by_index[idx])
+                alpha_vs_idx = np.mean(portfolio_returns - idx_returns)
+                metrics[f'Alpha_vs_{idx}'] = alpha_vs_idx
+            
             performance_summary.append(metrics)
             
-            logger.info(f"\n  [지표 - {ratio*100:.0f}%]")
+            logger.info(f"\n  [지표 - {ratio_key}]")
             logger.info(f"    CAGR: {metrics['Portfolio_CAGR']*100:.2f}%")
             logger.info(f"    Sharpe: {metrics['Portfolio_Sharpe']:.2f}")
             logger.info(f"    MDD: {metrics['Portfolio_MDD']*100:.2f}%")
-            logger.info(f"    Benchmark CAGR: {metrics['Benchmark_CAGR']*100:.2f}%")
-            logger.info(f"    Alpha: {metrics['Alpha']*100:.2f}%")
+            logger.info(f"    Alpha (vs S&P500): {metrics['Alpha_vs_S&P500']*100:.2f}%")
+            logger.info(f"    Alpha (vs Russell2000): {metrics['Alpha_vs_Russell2000']*100:.2f}%")
             logger.info(f"    IR: {ir:.2f}")
         
-        # ⭐ 벤치마크 성과 지표 계산 (전략과 동일한 방식)
-        years = len(benchmark_returns)
-        benchmark_cagr = calculate_cagr(benchmark_returns, years)
-        benchmark_sharpe = calculate_sharpe_ratio(benchmark_returns)
+        # 7. 결과 저장 (5개 벤치마크 포함)
+        logger.info(f"\n[7단계] 결과 저장 (5개 벤치마크 포함)")
         
-        # MDD는 cumulative returns 필요
-        benchmark_cumulative = (1 + benchmark_returns).cumprod()
-        benchmark_mdd = calculate_mdd(benchmark_cumulative)
+        # 성과 지표 저장
+        summary_df = pd.DataFrame(performance_summary)
+        summary_df.to_csv(CACHE_DIR / 'step5_backtest_metrics.csv', index=False)
+        logger.info(f"  ✅ 성과 지표: {CACHE_DIR / 'step5_backtest_metrics.csv'}")
         
-        # ⭐ 30% 전략에 대해 벤치마크 비교 테이블 출력
-        ratio_30_metrics = [m for m in performance_summary if m['Long_Ratio'] == 0.30]
-        if ratio_30_metrics:
-            m = ratio_30_metrics[0]
-            
-            # Win Rate 계산
-            portfolio_ret = all_results[0.30]['Portfolio_Return']
-            wins = (portfolio_ret > benchmark_returns).sum()
-            win_rate = wins / len(portfolio_ret) if len(portfolio_ret) > 0 else 0.0
-            
-            logger.info(f"\n{'='*60}")
-            logger.info(f"  📊 STRATEGY vs S&P 500 BENCHMARK COMPARISON")
-            logger.info(f"{'='*60}")
-            logger.info(f"")
-            logger.info(f"  Metric              Strategy      S&P 500       Performance")
-            logger.info(f"  {'-'*58}")
-            
-            # CAGR
-            cagr_diff = (m['Portfolio_CAGR'] - benchmark_cagr) * 100
-            cagr_emoji = "✅" if cagr_diff > 0 else "❌"
-            logger.info(f"  CAGR                {m['Portfolio_CAGR']*100:6.2f}%       {benchmark_cagr*100:6.2f}%       {cagr_emoji} {cagr_diff:+.2f}%p")
-            
-            # Sharpe
-            sharpe_diff = m['Portfolio_Sharpe'] - benchmark_sharpe
-            sharpe_emoji = "✅" if sharpe_diff > 0 else "❌"
-            sharpe_label = "Efficient" if sharpe_diff > 0 else "Inefficient"
-            logger.info(f"  Sharpe Ratio        {m['Portfolio_Sharpe']:6.2f}        {benchmark_sharpe:6.2f}        {sharpe_emoji} {sharpe_label}")
-            
-            # MDD (더 작은 절댓값이 좋음)
-            mdd_diff = (m['Portfolio_MDD'] - benchmark_mdd) * 100
-            mdd_emoji = "✅" if mdd_diff > 0 else "❌"  # MDD가 덜 마이너스면 좋음
-            mdd_label = "Defensive" if mdd_diff > 0 else "Aggressive"
-            logger.info(f"  MDD                 {m['Portfolio_MDD']*100:6.2f}%       {benchmark_mdd*100:6.2f}%       {mdd_emoji} {mdd_label}")
-            
-            # Alpha
-            alpha_display = f"{m['Alpha']*100:6.2f}%" if not np.isnan(m['Alpha']) else "  nan%"
-            logger.info(f"  Alpha               {alpha_display}        0.00%        -")
-            
-            # Win Rate
-            logger.info(f"  Win Rate            {win_rate*100:6.1f}%        -             -")
-            
-            logger.info(f"  {'-'*58}")
-            logger.info(f"")
-            logger.info(f"  ✅ = Outperformed | ❌ = Underperformed")
-            logger.info(f"{'='*60}")
+        # 연도별 수익률 저장 (5개 벤치마크 모두 포함)
+        returns_dict = {'Year': rebalance_years}
+        for ratio_key, results_df in all_results.items():
+            returns_dict[ratio_key] = results_df['Portfolio_Return'].values
         
-        performance_df = pd.DataFrame(performance_summary)
+        # 5개 벤치마크 모두 추가
+        for idx in BENCHMARK_INDICES:
+            returns_dict[idx] = benchmark_returns_by_index[idx]
         
-        # 7. 저장
-        logger.info(f"\n[7단계] 결과 저장")
+        # Alpha 계산 (대표 포트폴리오 기준)
+        if 'Gap_10%' in all_results:
+            main_portfolio = all_results['Gap_10%']['Portfolio_Return'].values
+            returns_dict['Alpha_vs_SP500'] = main_portfolio - np.array(benchmark_returns_by_index['S&P500'])
+            returns_dict['Alpha_vs_R2000'] = main_portfolio - np.array(benchmark_returns_by_index['Russell2000'])
         
-        # 연도별 수익률 (모든 비율)
-        combined_returns = pd.DataFrame({'Year': results_df['Year']})
-        for ratio, results_df in all_results.items():
-            combined_returns[f'Return_{int(ratio*100)}pct'] = results_df['Portfolio_Return'].values
+        returns_df = pd.DataFrame(returns_dict)
+        returns_df.to_csv(CACHE_DIR / 'step5_backtest_returns.csv', index=False)
+        logger.info(f"  ✅ 연도별 수익률: {CACHE_DIR / 'step5_backtest_returns.csv'}")
+        logger.info(f"     → 컬럼: Year, Portfolio Returns, {', '.join(BENCHMARK_INDICES)}, Alpha")
         
-        # 벤치마크 추가
-        combined_returns['Benchmark_SP500'] = benchmark_returns.values
-        combined_returns['Benchmark_EqualWeight'] = universe_returns.values
+        # 포트폴리오 히스토리 저장
+        self.save_portfolio_history()
         
-        output_path_returns = CACHE_DIR / 'step5_backtest_returns.csv'
-        combined_returns.to_csv(output_path_returns, index=False)
-        logger.info(f"  → 연도별 수익률: {output_path_returns}")
-        
-        # 성과 지표
-        output_path_metrics = CACHE_DIR / 'step5_backtest_metrics.csv'
-        performance_df.to_csv(output_path_metrics, index=False)
-        logger.info(f"  → 성과 지표: {output_path_metrics}")
-        
-        # 8. ⭐ 그래프 그리기
-        self.plot_performance(combined_returns)
-        
-        # 8. ⚠️ 생존 편향 경고
+        # 8. Survivorship Bias 경고
         logger.warning("")
         logger.warning("="*60)
-        logger.warning("  ⚠️  SURVIVORSHIP BIAS WARNING  ⚠️")
+        logger.warning("⚠️  경고: Survivorship Bias 가능성")
         logger.warning("="*60)
-        logger.warning("본 백테스트는 생존 편향(Survivorship Bias)에 노출되어 있습니다.")
-        logger.warning("")
-        logger.warning("문제점:")
-        logger.warning("  - 데이터 소스: yfinance (무료 버전)")
-        logger.warning("  - 상장폐지/파산 종목 데이터 미포함 (테스트 결과: SIVB, TWTR 없음)")
-        logger.warning("  - 현재 데이터셋: 450개 티커 모두 2026년까지 생존")
-        logger.warning("")
-        logger.warning("영향:")
-        logger.warning("  - 실제 수익률은 보고된 값보다 20-40% 낮을 수 있습니다.")
-        logger.warning("  - 보수적 추정: CAGR × 0.6 ~ 0.8")
-        logger.warning("")
-        logger.warning("권장 조치:")
-        logger.warning("  1. S&P 500 Historical Constituents 데이터 확보")
-        logger.warning("  2. Bloomberg/FactSet 등 유료 데이터 활용")
-        logger.warning("  3. 리포트에 이 한계 명시")
-        logger.warning("="*60)
-        logger.warning("")
         
         logger.info("")
         logger.info("="*60)
@@ -590,6 +566,153 @@ class PortfolioBacktester:
         logger.info("="*60)
         
         return all_results
+
+    def save_portfolio_history(self) -> None:
+        """
+        Step 5.5: 포트폴리오 히스토리 저장 (Excel)
+        
+        연도별 선택된 티커 리스트, Gap, 수익률 등을 Excel로 저장
+        다른 개발자/분석가가 백테스트 결과를 상세히 확인 가능
+        
+        출력 파일: reports/backtest_portfolio_history.xlsx
+        
+        시트 구성:
+        1. Summary: 각 비율별 요약 통계
+        2. Top_5pct: 상위 5% 포트폴리오 연도별 상세
+        3. Top_10pct: 상위 10% 포트폴리오 연도별 상세
+        4. Top_20pct: 상위 20% 포트폴리오 연도별 상세
+        5. Top_30pct: 상위 30% 포트폴리오 연도별 상세
+        """
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            from openpyxl.utils.dataframe import dataframe_to_rows
+            
+            output_path = REPORTS_DIR / 'backtest_portfolio_history.xlsx'
+            
+            # 디렉토리 확인
+            REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+            
+            wb = Workbook()
+            
+            # ============================================
+            # Summary 시트
+            # ============================================
+            ws_summary = wb.active
+            ws_summary.title = "Summary"
+            
+            # 헤더 스타일
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_align = Alignment(horizontal="center", vertical="center")
+            
+            # Summary 헤더
+            summary_headers = ["Ratio", "Years", "Avg_Tickers", "Avg_Return", "Total_Return", "Best_Year", "Worst_Year"]
+            for col, header in enumerate(summary_headers, 1):
+                cell = ws_summary.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+            
+            # Summary 데이터
+            row_idx = 2
+            for ratio, history in self.portfolio_history.items():
+                if not history:
+                    continue
+                    
+                avg_tickers = np.mean([len(h['tickers']) for h in history])
+                avg_return = np.mean([h['return'] for h in history])
+                total_return = np.prod([1 + h['return'] for h in history]) - 1
+                best_year = max(history, key=lambda x: x['return'])
+                worst_year = min(history, key=lambda x: x['return'])
+                
+                ws_summary.cell(row=row_idx, column=1, value=f"Top {ratio*100:.0f}%")
+                ws_summary.cell(row=row_idx, column=2, value=len(history))
+                ws_summary.cell(row=row_idx, column=3, value=round(avg_tickers, 1))
+                ws_summary.cell(row=row_idx, column=4, value=f"{avg_return*100:.2f}%")
+                ws_summary.cell(row=row_idx, column=5, value=f"{total_return*100:.2f}%")
+                ws_summary.cell(row=row_idx, column=6, value=f"FY{best_year['year']} ({best_year['return']*100:.2f}%)")
+                ws_summary.cell(row=row_idx, column=7, value=f"FY{worst_year['year']} ({worst_year['return']*100:.2f}%)")
+                row_idx += 1
+            
+            # 컬럼 너비 조정
+            ws_summary.column_dimensions['A'].width = 12
+            ws_summary.column_dimensions['B'].width = 8
+            ws_summary.column_dimensions['C'].width = 12
+            ws_summary.column_dimensions['D'].width = 12
+            ws_summary.column_dimensions['E'].width = 14
+            ws_summary.column_dimensions['F'].width = 22
+            ws_summary.column_dimensions['G'].width = 22
+            
+            # ============================================
+            # 각 비율별 상세 시트
+            # ============================================
+            ratio_to_name = {
+                0.05: "Top_5pct",
+                0.10: "Top_10pct",
+                0.20: "Top_20pct",
+                0.30: "Top_30pct"
+            }
+            
+            for ratio, history in self.portfolio_history.items():
+                if not history:
+                    continue
+                
+                sheet_name = ratio_to_name.get(ratio, f"Top_{ratio*100:.0f}pct")
+                ws = wb.create_sheet(title=sheet_name)
+                
+                # 헤더
+                headers = ["Year", "N_Tickers", "Return", "Ticker", "Gap", "y_actual", "yhat_pred", "Rank"]
+                for col, header in enumerate(headers, 1):
+                    cell = ws.cell(row=1, column=col, value=header)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = header_align
+                
+                # 데이터
+                row_idx = 2
+                for year_data in history:
+                    year = year_data['year']
+                    tickers = year_data['tickers']
+                    gaps = year_data['gaps']
+                    ret = year_data['return']
+                    
+                    # 각 티커별로 한 줄씩
+                    for rank, gap_info in enumerate(gaps, 1):
+                        ws.cell(row=row_idx, column=1, value=f"FY{year}")
+                        ws.cell(row=row_idx, column=2, value=len(tickers))
+                        ws.cell(row=row_idx, column=3, value=f"{ret*100:.2f}%")
+                        ws.cell(row=row_idx, column=4, value=gap_info['Ticker'])
+                        ws.cell(row=row_idx, column=5, value=round(gap_info['Gap'], 4) if gap_info.get('Gap') else None)
+                        ws.cell(row=row_idx, column=6, value=round(gap_info['y'], 4) if gap_info.get('y') else None)
+                        ws.cell(row=row_idx, column=7, value=round(gap_info['yhat'], 4) if gap_info.get('yhat') else None)
+                        ws.cell(row=row_idx, column=8, value=rank)
+                        row_idx += 1
+                    
+                    # 연도 구분선 (빈 행 추가)
+                    row_idx += 1
+                
+                # 컬럼 너비 조정
+                ws.column_dimensions['A'].width = 10
+                ws.column_dimensions['B'].width = 12
+                ws.column_dimensions['C'].width = 10
+                ws.column_dimensions['D'].width = 10
+                ws.column_dimensions['E'].width = 10
+                ws.column_dimensions['F'].width = 12
+                ws.column_dimensions['G'].width = 12
+                ws.column_dimensions['H'].width = 8
+            
+            # 저장
+            wb.save(output_path)
+            logger.info(f"  → 포트폴리오 히스토리: {output_path}")
+            logger.info(f"     - Summary 시트: 각 비율별 요약 통계")
+            logger.info(f"     - Top_5pct/10pct/20pct/30pct: 연도별 선택 티커 상세")
+            
+        except ImportError:
+            logger.warning("  ⚠️ openpyxl 패키지 없음 - 포트폴리오 히스토리 Excel 저장 스킵")
+            logger.warning("     pip install openpyxl 로 설치 후 재실행")
+        except Exception as e:
+            logger.error(f"  ❌ 포트폴리오 히스토리 저장 실패: {e}")
 
     def plot_performance(self, df: pd.DataFrame):
         """

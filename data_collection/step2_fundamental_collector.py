@@ -57,7 +57,8 @@ from config.constants import (
 from config.paths import (
     STEP1_META_JSON,
     STEP2_FUNDAMENTALS_CSV,
-    DATA_CACHE_DIR
+    DATA_CACHE_DIR,
+    STEP0_VALID_UNIVERSE_JSON
 )
 from utils import (
     get_logger,
@@ -577,20 +578,40 @@ class FundamentalCollector:
         전체 파이프라인을 실행합니다.
         
         실행 순서:
-        1. Step1 메타 정보에서 티커 리스트 로드
-        2. SEC companyfacts 수집
+        1. Step 0 유니버스에서 티커/CIK/섹터 로드 (⭐ 우선)
+        2. SEC companyfacts 수집 (CIK 직접 사용)
         3. 재무 데이터 파싱
         4. 캐시 저장
         """
+        import json
+        
         log_section_header(logger, "Step2: SEC 재무 데이터 수집 시작")
         
-        # 1. Step1에서 티커 로드
-        meta = load_cache(STEP1_META_JSON)
-        tickers = meta['tickers']
-        logger.info(f"Step1에서 {len(tickers)}개 티커 로드")
-        
-        # 2. 재무 데이터 수집
-        fund_df = self.collect_fundamentals(tickers)
+        # ⭐ Step 0 유니버스 우선 사용
+        if STEP0_VALID_UNIVERSE_JSON.exists():
+            logger.info("📜 Step 0 유니버스에서 티커/CIK/섹터 로드")
+            with open(STEP0_VALID_UNIVERSE_JSON, 'r', encoding='utf-8') as f:
+                universe = json.load(f)
+            
+            tickers = [item['ticker'] for item in universe]
+            cik_map = {item['ticker']: item['cik'] for item in universe}
+            sector_map = {item['ticker']: item['sector'] for item in universe}
+            
+            logger.info(f"  → 유효 티커: {len(tickers)}개")
+            logger.info(f"  → CIK 매핑 완료: {len(cik_map)}개")
+            logger.info(f"  → 섹터 정보 완료: {len(sector_map)}개")
+            
+            # ⭐ 직접 재무 데이터 수집 (CIK 사용)
+            fund_df = self._collect_with_universe(tickers, cik_map, sector_map)
+        else:
+            # 레거시 모드: Step1 메타에서 티커 로드
+            logger.warning("⚠️  Step 0 유니버스 없음 - 레거시 모드로 동작")
+            meta = load_cache(STEP1_META_JSON)
+            tickers = meta['tickers']
+            logger.info(f"Step1에서 {len(tickers)}개 티커 로드")
+            
+            # 기존 방식 사용
+            fund_df = self.collect_fundamentals(tickers)
         
         if fund_df.empty:
             logger.error("❌ 수집된 데이터 없음!")
@@ -603,6 +624,68 @@ class FundamentalCollector:
         self.save_to_cache(fund_df)
         
         log_section_header(logger, "Step2: SEC 재무 데이터 수집 완료")
+    
+    def _collect_with_universe(
+        self,
+        tickers: List[str],
+        cik_map: Dict[str, str],
+        sector_map: Dict[str, str]
+    ) -> pd.DataFrame:
+        """
+        Step 0 유니버스를 활용한 재무 데이터 수집
+        
+        CIK와 섹터 정보가 이미 준비되어 있어 효율적
+        """
+        logger.info(f"SEC 재무 데이터 수집 중... (총 {len(tickers)}개 티커)")
+        
+        all_financials = []
+        success_count = 0
+        fail_count = 0
+        
+        from tqdm import tqdm
+        
+        for ticker in tqdm(tickers, desc="SEC 데이터 수집"):
+            try:
+                # ⭐ CIK를 유니버스에서 직접 가져옴
+                cik = cik_map.get(ticker)
+                
+                if not cik:
+                    logger.warning(f"  {ticker}: CIK 없음 (건너뛰기)")
+                    fail_count += 1
+                    continue
+                
+                # SEC 데이터 다운로드 및 파싱
+                companyfacts = self.fetch_companyfacts(cik, ticker)
+                
+                if companyfacts is None:
+                    fail_count += 1
+                    continue
+                    
+                annual_financials = self.parse_financials(ticker, companyfacts)
+                
+                if annual_financials is None or annual_financials.empty:
+                    logger.debug(f"  {ticker}: 재무 데이터 없음")
+                    fail_count += 1
+                else:
+                    # ⭐ 섹터 정보를 유니버스에서 직접 가져옴
+                    annual_financials['Sector'] = sector_map.get(ticker, 'Unknown')
+                    all_financials.append(annual_financials)
+                    success_count += 1
+                    
+            except Exception as e:
+                logger.error(f"  {ticker}: 수집 실패 - {e}")
+                fail_count += 1
+        
+        logger.info(f"✅ SEC 데이터 수집 완료")
+        logger.info(f"  - 성공: {success_count}개")
+        logger.info(f"  - 실패: {fail_count}개")
+        
+        if all_financials:
+            df = pd.concat(all_financials, ignore_index=True)
+            df = df.sort_values(['Ticker', 'FiscalYear'])
+            return df
+        else:
+            return pd.DataFrame()
 
 
 # ===========================================

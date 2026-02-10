@@ -48,6 +48,10 @@ LOGS_DIR = PROJECT_ROOT / 'logs'
 # Step별 출력 파일 경로
 # ===========================================
 
+# Step0: 유니버스 빌더 (유효 티커 목록)
+# - 필터링된 유효 티커 + CIK 매핑 정보
+STEP0_VALID_UNIVERSE_JSON = DATA_CACHE_DIR / 'step0_valid_universe.json'
+
 # Step1: 가격 데이터 수집
 # - 월말 조정종가 (수익률 계산용)
 STEP1_PRICE_ADJ_CSV = DATA_CACHE_DIR / 'step1_px_adj_m.csv'
@@ -111,6 +115,12 @@ CHART_GAP_DISTRIBUTION = REPORTS_DIR / 'gap_distribution.png'
 
 # 성과 지표 테이블
 CHART_METRICS_TABLE = REPORTS_DIR / 'metrics_table.png'
+
+# Step 3.5: 유니버스 리포트 (데이터 품질 점검용)
+UNIVERSE_REPORT_XLSX = REPORTS_DIR / 'final_universe_report.xlsx'
+
+# Step 5.5: 백테스트 포트폴리오 히스토리 (연도별 선택 티커 리스트)
+BACKTEST_PORTFOLIO_HISTORY_XLSX = REPORTS_DIR / 'backtest_portfolio_history.xlsx'
 
 
 # ===========================================
