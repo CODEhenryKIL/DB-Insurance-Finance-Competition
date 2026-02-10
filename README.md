@@ -30,36 +30,50 @@
 안티그래비티 - 개발/
 ├── config/                     # 설정 파일
 │   ├── constants.py           # 전역 상수
-│   └── paths.py               # 경로 관리
+│   ├── paths.py               # 경로 관리
+│   └── settings.py            # 통합 설정 (v3.0.0+)
+├── core/                       # 핵심 모듈 (v3.0.0+)
+│   ├── models.py              # MSE + RankNet 통합 모델
+│   └── restatement.py         # 회계 재작성 로직
 ├── utils/                      # 공통 유틸리티
 │   ├── logger.py              # 로깅 시스템
 │   ├── validators.py          # 데이터 검증 및 방어 로직
 │   └── helpers.py             # 헬퍼 함수
 ├── data_collection/            # 데이터 수집
+│   ├── step0_universe_filter.py
 │   ├── step1_price_collector.py
 │   └── step2_fundamental_collector.py
 ├── feature_engineering/        # 피처 생성
-│   ├── restatement.py
+│   ├── restatement.py         # 호환성 래퍼 → core/restatement.py
 │   └── step3_feature_builder.py
 ├── modeling/                   # 모델링
-│   ├── model.py
+│   ├── model.py               # 호환성 래퍼 → core/models.py
+│   ├── model_ranknet.py       # 호환성 래퍼 → core/models.py
 │   └── step4_train_predict.py
 ├── backtesting/                # 백테스팅
-│   ├── universe_filter.py
-│   ├── portfolio.py
-│   └── step5_backtest.py
-├── evaluation/                 # 평가 및 시각화
 │   ├── metrics.py
-│   └── visualizer.py
+│   └── step5_backtest.py
+├── experiments/                # 실험 프레임워크 (v2.6.0+)
+│   ├── config.py
+│   ├── runner.py
+│   ├── saver.py
+│   ├── reporter.py
+│   └── run_experiment.py
+├── tests/                      # 테스트 (v3.0.1+)
+│   ├── test_basic_modules.py
+│   ├── test_step1_quick.py
+│   └── test_step2_quick.py
+├── docs/                       # 문서 (v3.0.1+)
+│   ├── CHANGELOG.md
+│   ├── PIPELINE_OVERVIEW.md
+│   ├── task.md
+│   └── AGENT_GUIDE.md
 ├── data_cache/                 # 캐시 (gitignore)
 ├── reports/                    # 리포트 (gitignore)
 ├── logs/                       # 로그 (gitignore)
-├── main.py                     # 전체 파이프라인 실행
 ├── requirements.txt
 ├── .gitignore
-├── README.md
-├── task.md                     # 개발 태스크 체크리스트
-└── implementation_plan.md      # 구현 계획서
+└── README.md
 ```
 
 ---
@@ -255,5 +269,5 @@ This project is for research purposes only.
 
 ---
 
-**Last Updated**: 2026-01-28
-**Version**: 1.0
+**Last Updated**: 2026-02-10
+**Version**: 3.0.1

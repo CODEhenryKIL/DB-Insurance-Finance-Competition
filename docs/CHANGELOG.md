@@ -1,7 +1,145 @@
 
 # M-Model 프로젝트 전체 변경 이력
 
-**마지막 업데이트**: 2026-02-10 
+**마지막 업데이트**: 2026-02-10
+
+---
+
+## ✅ v3.0.1 폴더 구조 정리 (2026-02-10)
+
+### 배경
+- 빈 폴더와 불필요한 디렉토리 정리 필요
+- 문서 파일들이 루트에 산재
+- 테스트 파일이 여러 위치에 분산
+
+### 변경 사항
+
+#### 1. 문서 파일 이동 (루트 → docs/)
+| 이전 위치 | 변경 위치 |
+|-----------|-----------|
+| `CHANGELOG.md` | `docs/CHANGELOG.md` |
+| `PIPELINE_OVERVIEW.md` | `docs/PIPELINE_OVERVIEW.md` |
+| `task.md` | `docs/task.md` |
+
+#### 2. 테스트 파일 통합 (루트 → tests/)
+| 이전 위치 | 변경 위치 |
+|-----------|-----------|
+| `test_basic_modules.py` | `tests/test_basic_modules.py` |
+| `test_step1_quick.py` | `tests/test_step1_quick.py` |
+| `test_step2_quick.py` | `tests/test_step2_quick.py` |
+
+#### 3. 삭제된 빈 폴더
+- `evaluation/` - 사용되지 않음
+- `notebooks/` - 빈 폴더
+- `pipeline/` - __init__.py만 존재
+
+#### 4. 실험 폴더 이름 변경
+- `experiments_v2/` → `experiments/`
+- 기존 `experiments/` (v1 레거시) 삭제
+
+### Git 커밋
+```
+v3.0.1 폴더 정리: 문서/테스트 통합, 빈 폴더 삭제
+```
+
+---
+
+## ✅ v3.0.0 코드 리팩토링 - 중복 제거 및 구조 단순화 (2026-02-10)
+
+### 배경
+- 코드 중복: MSE/RankNet 모델이 별도 파일에 존재
+- 분기별 수집기가 연간 수집기와 중복
+- 설정 파일이 constants.py, paths.py, paths_quarterly.py로 분산
+- 전체 코드 9,013줄 → 7,549줄 (16% 감소)
+
+### 주요 변경 사항
+
+#### 1. 통합 모듈 생성 (core/)
+```
+core/
+├── __init__.py           # 패키지 초기화
+├── models.py             # MSE + RankNet 통합 모델
+└── restatement.py        # 회계 재작성 로직
+```
+
+**core/models.py 주요 클래스:**
+- `LinearModel` - 단일 선형 모델 (MSE/RankNet 공용)
+- `RankNetLoss` - 쌍대비교 손실 함수
+- `compute_rank_ic()` - 랭크 상관계수 계산
+- `compute_ndcg()` - NDCG 지표 계산
+- `LinearPBRModel = LinearModel` (호환성 별칭)
+- `LinearRankNetModel = LinearModel` (호환성 별칭)
+
+**core/restatement.py 함수:**
+- `calculate_investment()` - 투자액 계산
+- `calculate_amortization()` - 상각액 계산
+- `calculate_adjusted_oi()` - 조정 영업이익 계산
+- `restate_financials()` - 재무제표 재작성
+
+#### 2. 통합 설정 파일 (config/settings.py)
+```python
+@dataclass
+class DataConfig:
+    START_YEAR: int = 2012
+    BACKTEST_START_YEAR: int = 2015
+    ...
+
+@dataclass
+class ModelConfig:
+    LEARNING_RATE: float = 0.01
+    MAX_EPOCHS: int = 1000
+    ...
+
+@dataclass
+class BacktestConfig:
+    TOP_N_NORMAL: int = 30
+    TOP_N_SMALLCAP: int = 50
+    ...
+```
+
+#### 3. 삭제된 중복 파일
+| 파일 | 이유 |
+|------|------|
+| `data_collection/step1_price_collector_sequential.py` | step1_price_collector.py로 통합 |
+| `data_collection/step1_price_collector_quarterly.py` | 분기별 로직 제거 |
+| `data_collection/step2_fundamental_collector_quarterly.py` | 분기별 로직 제거 |
+| `feature_engineering/step3_feature_builder_broken.py` | 오래된 버전 |
+| `feature_engineering/step3_feature_builder.py.bak` | 백업 파일 |
+| `config/paths_quarterly.py` | paths.py로 통합 |
+| `run_quarterly_collection.py` | 분기별 실행 스크립트 제거 |
+
+#### 4. 호환성 래퍼 (기존 import 유지)
+```python
+# modeling/model.py
+from core.models import LinearModel as LinearPBRModel
+__all__ = ['LinearPBRModel']
+
+# modeling/model_ranknet.py
+from core.models import LinearModel as LinearRankNetModel, RankNetLoss
+__all__ = ['LinearRankNetModel', 'RankNetLoss', 'compute_rank_ic', 'compute_ndcg']
+
+# feature_engineering/restatement.py
+from core.restatement import *
+```
+
+### 테스트 검증
+```bash
+# 모든 모듈 import 테스트 통과
+python3 -c "from modeling.model import LinearPBRModel; print('OK')"
+python3 -c "from modeling.model_ranknet import LinearRankNetModel; print('OK')"
+python3 -c "from feature_engineering.restatement import restate_financials; print('OK')"
+python3 -c "from core.models import LinearModel; print('OK')"
+```
+
+### Git 커밋
+```
+v3.0.0 리팩토링: core/ 모듈 통합, 중복 제거, 설정 통합
+- core/models.py: MSE+RankNet 모델 통합
+- core/restatement.py: 회계 재작성 로직 통합
+- config/settings.py: constants + paths 통합
+- 7개 중복 파일 삭제
+- 호환성 래퍼 유지
+```
 
 ---
 

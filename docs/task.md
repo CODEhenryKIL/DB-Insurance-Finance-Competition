@@ -1,10 +1,10 @@
 # M-Model 프로젝트 작업 현황
 
-**업데이트**: 2026-01-31 01:45
+**업데이트**: 2026-02-10 
 
 ---
 
-## 🎯 현재 상태: S&P 500 실험 완료
+## 🎯 현재 상태: v3.0.1 코드 리팩토링 완료
 
 ### 최신 실험 결과 (exp_007_sp500_sector)
 
@@ -22,6 +22,22 @@
 ---
 
 ## ✅ 완료된 작업
+
+### 2026-02-10
+
+1. **v3.0.0 코드 리팩토링**
+   - [x] `core/models.py` - MSE + RankNet 모델 통합
+   - [x] `core/restatement.py` - 회계 재작성 로직 통합
+   - [x] `config/settings.py` - 설정 파일 통합
+   - [x] 7개 중복 파일 삭제
+   - [x] 호환성 래퍼 생성 (기존 import 유지)
+   - [x] 코드량 16% 감소 (9,013줄 → 7,549줄)
+
+2. **v3.0.1 폴더 구조 정리**
+   - [x] 문서 이동: CHANGELOG.md, PIPELINE_OVERVIEW.md, task.md → docs/
+   - [x] 테스트 통합: test_*.py → tests/
+   - [x] 빈 폴더 삭제: evaluation/, notebooks/, pipeline/
+   - [x] 실험 폴더 통합: experiments_v2/ → experiments/
 
 ### 2026-01-31
 
