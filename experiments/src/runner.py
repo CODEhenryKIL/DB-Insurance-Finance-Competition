@@ -12,7 +12,8 @@
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent
+# experiments/src/ -> experiments/ -> 프로젝트 루트
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import pandas as pd
@@ -132,17 +133,44 @@ class ExperimentRunner:
         self.price_df.index = pd.to_datetime(self.price_df.index, utc=True)
         logger.info(f"  → 가격 데이터: {self.price_df.shape}")
         
-        # 가중치 히스토리 (있으면)
-        if self.config.model_type == "RankNet":
-            weights_path = CACHE_DIR / 'step4_weights_history_ranknet.csv'
-        else:
-            weights_path = CACHE_DIR / 'step4_weights_history.csv'
+        # 가중치 히스토리 (predictions_file에서 suffix 추출)
+        # step4_predictions.csv → step4_weights_history.csv
+        # step4_predictions_3y.csv → step4_weights_history_3y.csv
+        # step4_predictions_ranknet.csv → step4_weights_history_ranknet.csv
+        # step4_predictions_ranknet_3y.csv → step4_weights_history_ranknet_3y.csv
+        pred_file = self.config.predictions_file
+        suffix = pred_file.replace('step4_predictions', '').replace('.csv', '')
+        # suffix 예: '', '_3y', '_ranknet', '_ranknet_3y'
+        weights_path = CACHE_DIR / f'step4_weights_history{suffix}.csv'
         
         if weights_path.exists():
             self.weights_df = pd.read_csv(weights_path)
             logger.info(f"  → 가중치 히스토리: {weights_path.name}")
         else:
             self.weights_df = None
+        
+        # ⭐ Market Mode 필터 적용 (SP500 vs FULL)
+        if hasattr(self.config, 'market_mode') and self.config.market_mode == 'SP500':
+            sp500_path = CACHE_DIR / 'sp500_tickers.txt'
+            if sp500_path.exists():
+                with open(sp500_path, 'r') as f:
+                    sp500_tickers = set([line.strip() for line in f if line.strip()])
+                before_count = len(self.predictions_df)
+                self.predictions_df = self.predictions_df[
+                    self.predictions_df['Ticker'].isin(sp500_tickers)
+                ]
+                after_count = len(self.predictions_df)
+                logger.info(f"  → SP500 필터 적용: {before_count} → {after_count}개")
+        
+        # ⭐ 섹터 필터 적용
+        if self.config.included_sectors:
+            before_count = len(self.predictions_df)
+            self.predictions_df = self.predictions_df[
+                self.predictions_df['Sector'].isin(self.config.included_sectors)
+            ]
+            after_count = len(self.predictions_df)
+            logger.info(f"  → 섹터 필터: {self.config.included_sectors}")
+            logger.info(f"  → 필터 후: {before_count} → {after_count}개 ({after_count/before_count*100:.1f}%)")
     
     def add_ranks(self) -> None:
         """Gap 기준 연도별 순위 추가"""
@@ -172,15 +200,33 @@ class ExperimentRunner:
     def apply_dollar_five_rule(
         self,
         tickers: List[str],
-        year: int
+        year: int,
+        quarter: int = None  # ⭐ 분기별 롤링 홀딩 지원
     ) -> List[str]:
         """
         $5 룰 적용
         
         최근 12개월 중 80% 이상이 $5 이하면 제외
+        
+        Parameters
+        ----------
+        quarter : int, optional
+            분기 (1, 2, 3, 4). None이면 연간 백테스트 (기본 12월)
         """
-        rebalance_date = pd.Timestamp(f"{year}-{self.config.rebalance_month:02d}-01", tz='UTC')
-        rebalance_date = rebalance_date + pd.offsets.MonthEnd(0)
+        # ⭐ 분기 매수일 계산
+        if quarter is not None:
+            # 분기별 매수일: Q1=3월말, Q2=6월말, Q3=9월말, Q4=12월말
+            quarter_end_month = quarter * 3
+            rebalance_date = pd.Timestamp(f"{year}-{quarter_end_month:02d}-01", tz='UTC')
+            rebalance_date = rebalance_date + pd.offsets.MonthEnd(0)
+        else:
+            # ⭐ Safe Lag 적용: 공시 지연 반영 (10-K는 FY 종료 후 60~90일 후 공시)
+            # FiscalYear 2022 재무제표 → 2023년 3월 말 매수 (safe_lag_months=3)
+            rebalance_date = pd.Timestamp(f"{year}-{self.config.rebalance_month:02d}-01", tz='UTC')
+            rebalance_date = rebalance_date + pd.offsets.MonthEnd(0)
+        
+        # Safe Lag 적용 (연간/분기 공통)
+        rebalance_date = rebalance_date + pd.DateOffset(months=self.config.safe_lag_months)
         
         start_date = rebalance_date - pd.DateOffset(months=12)
         recent_prices = self.price_df.loc[start_date:rebalance_date]
@@ -203,10 +249,16 @@ class ExperimentRunner:
     def calculate_portfolio_return(
         self,
         tickers: List[str],
-        year: int
+        year: int,
+        quarter: int = None  # ⭐ 분기별 롤링 홀딩 지원
     ) -> Tuple[float, List[float]]:
         """
         포트폴리오 수익률 계산
+        
+        Parameters
+        ----------
+        quarter : int, optional
+            분기 (1, 2, 3, 4). None이면 연간 백테스트 (기본 12월)
         
         Returns
         -------
@@ -218,11 +270,21 @@ class ExperimentRunner:
         if len(tickers) == 0:
             return 0.0, []
         
-        # 매수 시점 (year년 12월 말)
-        buy_date = pd.Timestamp(f"{year}-{self.config.rebalance_month:02d}-01", tz='UTC')
-        buy_date = buy_date + pd.offsets.MonthEnd(0)
+        # ⭐ 분기 매수일 계산
+        if quarter is not None:
+            # 분기별 매수일: Q1=3월말, Q2=6월말, Q3=9월말, Q4=12월말
+            quarter_end_month = quarter * 3
+            buy_date = pd.Timestamp(f"{year}-{quarter_end_month:02d}-01", tz='UTC')
+            buy_date = buy_date + pd.offsets.MonthEnd(0)
+        else:
+            # ⭐ Safe Lag 적용: 공시 지연 반영
+            buy_date = pd.Timestamp(f"{year}-{self.config.rebalance_month:02d}-01", tz='UTC')
+            buy_date = buy_date + pd.offsets.MonthEnd(0)
         
-        # 매도 시점 (12개월 후)
+        # Safe Lag 적용 (연간/분기 공통)
+        buy_date = buy_date + pd.DateOffset(months=self.config.safe_lag_months)
+        
+        # 매도 시점 (holding_months 후)
         sell_date = buy_date + pd.DateOffset(months=self.config.holding_months)
         
         individual_returns = []
@@ -310,6 +372,80 @@ class ExperimentRunner:
         
         return result
     
+    def run_backtest_for_quarter(
+        self,
+        year: int,
+        quarter: int,
+        portfolio_type: str,
+        ratio: float
+    ) -> YearlyResult:
+        """
+        분기별 롤링 홀딩 백테스트
+        
+        각 분기에 매수한 포트폴리오는 12개월 보유 후 매도
+        
+        Parameters
+        ----------
+        year : int
+            FiscalYear
+        quarter : int
+            FiscalQuarter (1, 2, 3, 4)
+        portfolio_type : str
+            "normal" or "smallcap"
+        ratio : float
+            상위 N% 비율
+        """
+        result = YearlyResult(
+            year=year,
+            portfolio_type=portfolio_type,
+            ratio=ratio
+        )
+        # 분기 정보를 위해 year 형식 변경: 2022.1, 2022.2 등
+        result.year = float(f"{year}.{quarter}")
+        
+        # 해당 연도+분기 데이터
+        quarter_df = self.predictions_df[
+            (self.predictions_df['FiscalYear'] == year) & 
+            (self.predictions_df['FiscalQuarter'] == quarter)
+        ].copy()
+        
+        if len(quarter_df) == 0:
+            return result
+        
+        # 포트폴리오 타입 필터링
+        if portfolio_type == "smallcap":
+            quarter_df = quarter_df[quarter_df['is_smallcap'] == True]
+        
+        if len(quarter_df) == 0:
+            return result
+        
+        # Gap 상위 N% 선택
+        n_select = max(1, int(len(quarter_df) * ratio))
+        top_df = quarter_df.nlargest(n_select, 'Gap')
+        
+        # $5 룰 적용 (분기 기준)
+        candidate_tickers = top_df['Ticker'].tolist()
+        valid_tickers = self.apply_dollar_five_rule(candidate_tickers, year, quarter=quarter)
+        
+        if len(valid_tickers) == 0:
+            return result
+        
+        # 최종 선택된 종목 정보
+        final_df = top_df[top_df['Ticker'].isin(valid_tickers)]
+        
+        result.tickers = valid_tickers
+        result.gaps = final_df['Gap'].tolist()
+        result.n_stocks = len(valid_tickers)
+        result.weights = [1.0 / len(valid_tickers)] * len(valid_tickers)
+        
+        # 수익률 계산 (12개월 홀딩)
+        result.portfolio_return, _ = self.calculate_portfolio_return(valid_tickers, year, quarter=quarter)
+        
+        # 벤치마크 수익률 (해당 분기 시작 기준)
+        result.benchmark_returns = self.get_benchmark_returns(year)
+        
+        return result
+    
     def run(self) -> ExperimentResults:
         """
         전체 실험 실행
@@ -340,23 +476,41 @@ class ExperimentRunner:
         # 수익률 계산 가능한 연도만 (다음 해 가격 필요)
         valid_years = [y for y in years if y < years[-1]]
         
+        # ⭐ 분기 데이터 여부 확인
+        is_quarterly = 'FiscalQuarter' in self.predictions_df.columns
+        
         logger.info(f"\n[백테스트 실행]")
         logger.info(f"  → 대상 연도: {valid_years}")
+        if is_quarterly:
+            logger.info(f"  → 분기 데이터 감지: 분기별 롤링 홀딩 (12개월) 적용")
         
         # 각 조합별 백테스트
         for year in valid_years:
             for portfolio_type in ["normal", "smallcap"]:
                 for ratio in self.config.long_ratios:
-                    yearly_result = self.run_backtest_for_year(year, portfolio_type, ratio)
-                    results.yearly_results.append(yearly_result)
-                    
-                    # 로그
-                    if yearly_result.n_stocks > 0:
-                        logger.debug(
-                            f"  FY{year} {portfolio_type} {ratio*100:.0f}%: "
-                            f"{yearly_result.n_stocks}종목, "
-                            f"수익률 {yearly_result.portfolio_return*100:.1f}%"
-                        )
+                    if is_quarterly:
+                        # ⭐ 분기별 롤링 홀딩: 각 분기 포트폴리오 12개월 보유
+                        for quarter in [1, 2, 3, 4]:
+                            # 해당 분기 데이터 존재 여부 확인
+                            q_exists = ((self.predictions_df['FiscalYear'] == year) & 
+                                       (self.predictions_df['FiscalQuarter'] == quarter)).any()
+                            if q_exists:
+                                quarterly_result = self.run_backtest_for_quarter(
+                                    year, quarter, portfolio_type, ratio
+                                )
+                                results.yearly_results.append(quarterly_result)
+                    else:
+                        # 연간 백테스트
+                        yearly_result = self.run_backtest_for_year(year, portfolio_type, ratio)
+                        results.yearly_results.append(yearly_result)
+                        
+                        # 로그
+                        if yearly_result.n_stocks > 0:
+                            logger.debug(
+                                f"  FY{year} {portfolio_type} {ratio*100:.0f}%: "
+                                f"{yearly_result.n_stocks}종목, "
+                                f"수익률 {yearly_result.portfolio_return*100:.1f}%"
+                            )
         
         # 성과 지표 계산
         results.performance_metrics = self._calculate_performance_metrics(results)
@@ -457,11 +611,29 @@ class ExperimentRunner:
         # 1. 가중치 적절성 검정 (가중치가 합리적인지)
         if results.weights_history is not None:
             weights = results.weights_history
+            # 컬럼명: MSE는 w_m1, w_m2, w_m3 / RankNet은 w1, w2, w3
+            # 두 형식 모두 지원
+            def get_weight_col(df, mse_name, ranknet_name):
+                """MSE/RankNet 가중치 컬럼 가져오기"""
+                if mse_name in df.columns:
+                    return df[mse_name]
+                elif ranknet_name in df.columns:
+                    return df[ranknet_name]
+                else:
+                    return None
+            
+            w1_col = get_weight_col(weights, 'w_m1', 'w1')
+            w2_col = get_weight_col(weights, 'w_m2', 'w2')
+            w3_col = get_weight_col(weights, 'w_m3', 'w3')
+            
             tests['weight_stability'] = {
-                'm1_std': weights['w1'].std() if 'w1' in weights.columns else np.nan,
-                'm2_std': weights['w2'].std() if 'w2' in weights.columns else np.nan,
-                'm3_std': weights['w3'].std() if 'w3' in weights.columns else np.nan,
-                'comment': '가중치 표준편차가 낮을수록 안정적'
+                'm1_std': w1_col.std() if w1_col is not None else np.nan,
+                'm2_std': w2_col.std() if w2_col is not None else np.nan,
+                'm3_std': w3_col.std() if w3_col is not None else np.nan,
+                'm1_mean': w1_col.mean() if w1_col is not None else np.nan,
+                'm2_mean': w2_col.mean() if w2_col is not None else np.nan,
+                'm3_mean': w3_col.mean() if w3_col is not None else np.nan,
+                'comment': '가중치 표준편차가 낮을수록 안정적 (시간에 따른 변동성)'
             }
             logger.info(f"  → 가중치 안정성 검정 완료")
         
@@ -483,7 +655,7 @@ class ExperimentRunner:
             }
             logger.info(f"  → Rank IC 검정 완료: 평균 {tests['rank_ic']['mean_ic']:.4f}")
         
-        # 3. 포트폴리오 강건성 (연도별 수익률 일관성)
+        # 3. 포트폴리오 강건성 (연도별 수익률 일관성 + Bootstrap)
         for portfolio_type in ["normal", "smallcap"]:
             for ratio in self.config.long_ratios:
                 key = f"{portfolio_type}_{int(ratio*100)}"
@@ -496,16 +668,32 @@ class ExperimentRunner:
                 if len(yearly) < 3:
                     continue
                 
-                returns = [r.portfolio_return for r in yearly]
+                returns = np.array([r.portfolio_return for r in yearly])
+                
+                # Bootstrap Confidence Interval (95%)
+                n_bootstrap = 1000
+                bootstrap_means = []
+                for _ in range(n_bootstrap):
+                    sample = np.random.choice(returns, size=len(returns), replace=True)
+                    bootstrap_means.append(np.mean(sample))
+                
+                ci_lower = np.percentile(bootstrap_means, 2.5)
+                ci_upper = np.percentile(bootstrap_means, 97.5)
+                
                 tests[f'robustness_{key}'] = {
-                    'positive_years': sum(1 for r in returns if r > 0),
-                    'negative_years': sum(1 for r in returns if r <= 0),
-                    'max_return': max(returns),
-                    'min_return': min(returns),
-                    'return_range': max(returns) - min(returns)
+                    'positive_years': int(np.sum(returns > 0)),
+                    'negative_years': int(np.sum(returns <= 0)),
+                    'max_return': float(np.max(returns)),
+                    'min_return': float(np.min(returns)),
+                    'return_range': float(np.max(returns) - np.min(returns)),
+                    # Bootstrap 결과
+                    'mean_return': float(np.mean(returns)),
+                    'bootstrap_ci_95_lower': float(ci_lower),
+                    'bootstrap_ci_95_upper': float(ci_upper),
+                    'is_robust': ci_lower > 0  # 95% CI가 0을 포함하지 않으면 강건
                 }
         
-        logger.info(f"  → 강건성 검정 완료")
+        logger.info(f"  → 강건성 검정 완료 (Bootstrap CI 포함)")
         
         return tests
 

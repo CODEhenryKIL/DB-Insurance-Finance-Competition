@@ -206,6 +206,55 @@ m3 = PIM_t / Avg(PIM_{t-1}, PIM_{t-2})
 
 ---
 
+## 🧪 실험 프레임워크 (v3.1.2)
+
+### CLI 기반 실험 실행
+
+```bash
+# 기본 사용법
+python experiments/run_experiment.py -u SP500 -s ALL -w 5 -f A -l RankNet -sl 3
+
+# 파라미터 설명
+# -u, --universe : SP500 | FULL (유니버스)
+# -s, --sector   : ALL | BioIT (섹터 필터)
+# -w, --window   : 3 | 5 (학습 윈도우, 년)
+# -f, --freq     : A | Q | S (Annual/Quarterly/Semiannual)
+# -l, --loss     : MSE | RankNet (손실함수)
+# -sl, --safe_lag: 0 | 3 (Look-ahead bias 방지, 기본: 3)
+```
+
+### 실험 예시
+
+```bash
+# S&P 500, RankNet, 5년 윈도우, 연간, Safe Lag 3개월
+python experiments/run_experiment.py -u SP500 -s ALL -w 5 -f A -l RankNet -sl 3
+
+# 바이오&IT만, 3년 윈도우, 분기 리밸런싱
+python experiments/run_experiment.py -u SP500 -s BioIT -w 3 -f Q -l RankNet -sl 3
+
+# 편향 있는 베이스라인 (12월 매수)
+python experiments/run_experiment.py -u SP500 -s ALL -w 5 -f A -l MSE -sl 0
+```
+
+### Safe Lag 설명
+
+| Safe Lag | 동작 | Look-ahead Bias |
+|----------|------|------------------|
+| 0 | 12월 결산 → 12월 말 매수 | 있음 (10-Q 발표 전) |
+| 3 | 12월 결산 → 3월 말 매수 | 없음 (10-K 발표 후) |
+
+### 분기/반기 롤링 홀딩
+
+분기/반기 리밸런싱 시 각 분기 포트폴리오를 12개월간 유지 (롤링):
+
+| 주기 | 동시 운용 포트폴리오 | 각 포트폴리오 가중치 |
+|------|---------------------|---------------------|
+| Annual | 1개 | 100% |
+| Quarterly | 4개 | 25%씩 |
+| Semiannual | 2개 | 50%씩 |
+
+---
+
 ## 🛡️ 방어 로직 (중요)
 
 ### 1. m1 계산 시
@@ -241,6 +290,50 @@ m3 = PIM_t / Avg(PIM_{t-1}, PIM_{t-2})
 
 ---
 
+## 🤖 AI 에이전트를 위한 컨텍스트 가이드
+
+### 맥락 파악을 위해 읽어야 할 파일
+
+| 목적 | 파일 | 설명 |
+|------|------|------|
+| **프로젝트 개요** | `README.md` | 핵심 아이디어, 구조, 실험 방법 |
+| **현재 작업 상태** | `docs/task.md` | 진행 중/완료된 작업, 실험 결과 |
+| **변경 이력** | `docs/CHANGELOG.md` | 버전별 변경사항, 최신 기능 |
+| **에이전트 가이드** | `docs/AGENT_GUIDE.md` | 핵심 개념, CLI 사용법, 자주 사용하는 명령어 |
+| **파이프라인 상세** | `docs/PIPELINE_OVERVIEW.md` | Step 1-5 상세, 데이터 흐름도, 파일 의존성 |
+| **미완료 작업** | `docs/ALL_DEFERRED_TASKS.md` | 우선순위별 대기 작업 목록 |
+
+### 실험 맥락 파악
+
+| 파일 경로 | 내용 |
+|-----------|------|
+| `experiments/exp_XXX/XXX-REPORT.md` | 실험 결과 보고서 |
+| `experiments/exp_XXX/XXX-config.json` | 실험 설정 (파라미터) |
+| `experiments/exp_XXX/data/` | 원본 데이터 |
+| `experiments/exp_XXX/metrics/` | 성과 지표 CSV |
+
+### 코드 맥락 파악
+
+| 목적 | 파일 |
+|------|------|
+| 실험 실행기 | `experiments/src/runner.py` |
+| 실험 설정 | `experiments/src/config.py` |
+| 모델 (MSE/RankNet) | `core/models.py` |
+| 회계 재작성 | `core/restatement.py` |
+| 피처 생성 | `feature_engineering/step3_feature_builder.py` |
+| 백테스트 | `backtesting/step5_backtest.py` |
+
+### 실험 비교 예시
+
+```bash
+# exp_011 vs exp_011_1 비교 (3개월 홀딩 vs 12개월 롤링 홀딩)
+# exp_011 (holding_months=3): CAGR = -4.4%
+# exp_011_1 (holding_months=12): CAGR = +16.8%
+# → 12개월 롤링 홀딩이 +21.2%p 성과 개선
+```
+
+---
+
 ## 🔍 주의사항
 
 ### 절대 실수 방지 체크리스트
@@ -269,5 +362,5 @@ This project is for research purposes only.
 
 ---
 
-**Last Updated**: 2026-02-10
-**Version**: 3.0.1
+**Last Updated**: 2026-02-13
+**Version**: 3.1.2

@@ -306,13 +306,18 @@ class RollingTrainer:
         
         return model
     
-    def run(self) -> pd.DataFrame:
+    def run(self, output_suffix: str = '') -> pd.DataFrame:
         """
         전체 Rolling window 학습 및 예측 파이프라인
         
         Y_TARGET_MODE 설정에 따라 단일 모델 학습:
         - 'raw': 단순 ln(PBR)
         - 'sector': 섹터 상대 ln(PBR) = ln(PBR) - Sector_Median
+        
+        Parameters
+        ----------
+        output_suffix : str
+            출력 파일 suffix (예: '3y' → step4_predictions_3y.csv)
         
         Returns
         -------
@@ -467,13 +472,16 @@ class RollingTrainer:
         # 5. 저장
         logger.info(f"[5단계] 캐시 저장 중...")
         
-        output_path = CACHE_DIR / 'step4_predictions.csv'
+        # output_suffix가 있으면 파일명에 추가
+        suffix = f"_{output_suffix}" if output_suffix else ""
+        
+        output_path = CACHE_DIR / f'step4_predictions{suffix}.csv'
         predictions_df.to_csv(output_path)
         logger.info(f"✅ 예측 결과 저장 완료: {output_path}")
         
         if weights_history:
             weights_df = pd.DataFrame(weights_history)
-            weights_path = CACHE_DIR / 'step4_weights_history.csv'
+            weights_path = CACHE_DIR / f'step4_weights_history{suffix}.csv'
             weights_df.to_csv(weights_path, index=False)
             logger.info(f"✅ 가중치 히스토리 저장 완료: {weights_path}")
         
@@ -491,6 +499,20 @@ class RollingTrainer:
 if __name__ == '__main__':
     """
     콘솔에서 직접 실행 시
+    
+    사용법:
+        python step4_train_predict.py                    # 기본 (5년 윈도우)
+        python step4_train_predict.py --window 3         # 3년 윈도우
+        python step4_train_predict.py --window 3 --suffix 3y  # 3년 윈도우 + 파일명 suffix
     """
-    trainer = RollingTrainer()
-    predictions = trainer.run()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Step4: 모델 학습 및 예측')
+    parser.add_argument('--window', type=int, default=TRAIN_WINDOW_YEARS, 
+                        help=f'학습 윈도우 (년, 기본: {TRAIN_WINDOW_YEARS})')
+    parser.add_argument('--suffix', type=str, default='',
+                        help='출력 파일 suffix (예: 3y → step4_predictions_3y.csv)')
+    args = parser.parse_args()
+    
+    trainer = RollingTrainer(train_window_years=args.window)
+    predictions = trainer.run(output_suffix=args.suffix)

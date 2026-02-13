@@ -12,7 +12,8 @@
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent
+# experiments/src/ -> experiments/ -> 프로젝트 루트
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import pandas as pd
@@ -28,25 +29,38 @@ from .runner import ExperimentResults, YearlyResult
 logger = get_logger(__name__)
 
 # 기본 실험 폴더
-EXPERIMENTS_V2_DIR = project_root / 'experiments_v2'
+EXPERIMENTS_DIR = project_root / 'experiments'
 
 
 class ResultSaver:
     """
     결과 저장 클래스
     
-    저장 항목:
-    1. config.json - 실험 설정
-    2. data/weights_history.csv - 연도별 가중치
-    3. data/returns_by_year.csv - 연도별 수익률
-    4. data/predictions_with_rank.csv - 예측 결과 + 순위
-    5. data/portfolio_holdings_normal.csv - 일반 포트폴리오 구성
-    6. data/portfolio_holdings_smallcap.csv - 소형주 포트폴리오 구성
-    7. metrics/performance_metrics.csv - 성과 지표
-    8. metrics/validation_tests.json - 검정 결과
+    저장 항목 (파일명 형식: {exp_num}-파일명):
+    1. {n}-config.json - 실험 설정
+    2. data/{n}-weights_history.csv - 연도별 가중치
+    3. data/{n}-returns_by_year.csv - 연도별 수익률
+    4. data/{n}-predictions_with_rank.csv - 예측 결과 + 순위
+    5. data/{n}-portfolio_holdings_normal.csv - 일반 포트폴리오 구성
+    6. data/{n}-portfolio_holdings_smallcap.csv - 소형주 포트폴리오 구성
+    7. metrics/{n}-performance_metrics.csv - 성과 지표
+    8. metrics/{n}-validation_tests.json - 검정 결과
+    9. {n}-REPORT.md - 보고서
     """
     
-    def __init__(self, base_dir: Path = EXPERIMENTS_V2_DIR):
+    @staticmethod
+    def _get_exp_num(exp_id: str) -> str:
+        """
+        exp_id에서 실험 번호 추출
+        
+        'exp_001' -> '001'
+        'exp_012' -> '012'
+        """
+        import re
+        match = re.search(r'(\d+)', exp_id)
+        return match.group(1) if match else exp_id
+    
+    def __init__(self, base_dir: Path = EXPERIMENTS_DIR):
         """
         초기화
         
@@ -151,16 +165,18 @@ class ResultSaver:
     
     def _save_config(self, exp_dir: Path, config: ExperimentConfig) -> None:
         """설정 저장"""
-        config_path = exp_dir / 'config.json'
+        exp_num = self._get_exp_num(config.exp_id)
+        config_path = exp_dir / f'{exp_num}-config.json'
         config.to_json(config_path)
-        logger.info(f"  → config.json 저장")
+        logger.info(f"  → {exp_num}-config.json 저장")
     
     def _save_weights_history(self, exp_dir: Path, results: ExperimentResults) -> None:
         """가중치 히스토리 저장"""
         if results.weights_history is not None:
-            path = exp_dir / 'data' / 'weights_history.csv'
+            exp_num = self._get_exp_num(results.config.exp_id)
+            path = exp_dir / 'data' / f'{exp_num}-weights_history.csv'
             results.weights_history.to_csv(path, index=False)
-            logger.info(f"  → weights_history.csv 저장")
+            logger.info(f"  → {exp_num}-weights_history.csv 저장")
     
     def _save_returns_by_year(self, exp_dir: Path, results: ExperimentResults) -> None:
         """연도별 수익률 저장"""
@@ -182,20 +198,38 @@ class ResultSaver:
             
             rows.append(row)
         
+        exp_num = self._get_exp_num(results.config.exp_id)
         df = pd.DataFrame(rows)
-        path = exp_dir / 'data' / 'returns_by_year.csv'
+        path = exp_dir / 'data' / f'{exp_num}-returns_by_year.csv'
         df.to_csv(path, index=False)
-        logger.info(f"  → returns_by_year.csv 저장 ({len(df)}행)")
+        logger.info(f"  → {exp_num}-returns_by_year.csv 저장 ({len(df)}행)")
     
     def _save_predictions_with_rank(self, exp_dir: Path, results: ExperimentResults) -> None:
         """예측 결과 + 순위 저장"""
         if results.predictions_with_rank is not None:
-            path = exp_dir / 'data' / 'predictions_with_rank.csv'
+            exp_num = self._get_exp_num(results.config.exp_id)
+            path = exp_dir / 'data' / f'{exp_num}-predictions_with_rank.csv'
             results.predictions_with_rank.to_csv(path, index=False)
-            logger.info(f"  → predictions_with_rank.csv 저장")
+            logger.info(f"  → {exp_num}-predictions_with_rank.csv 저장")
     
     def _save_portfolio_holdings(self, exp_dir: Path, results: ExperimentResults) -> None:
-        """포트폴리오 구성 저장 (일반/소형주 분리)"""
+        """
+        포트폴리오 구성 저장 (일반/소형주 분리)
+        
+        ⭐ 영향력 지표 추가:
+        - Weight: 종목 비중
+        - Gap: 예측 갭
+        - Contribution: Weight × Gap (상대적 기여도)
+        - Rank: Gap 기준 순위
+        - Sector: 섹터 정보
+        """
+        
+        # 섹터 매핑 생성 (Ticker-Year → Sector)
+        sector_map = {}
+        if results.predictions_with_rank is not None and 'Sector' in results.predictions_with_rank.columns:
+            for _, row in results.predictions_with_rank.iterrows():
+                key = (row['Ticker'], row['FiscalYear'])
+                sector_map[key] = row['Sector']
         
         for portfolio_type in ["normal", "smallcap"]:
             rows = []
@@ -204,36 +238,53 @@ class ResultSaver:
                 if yr.portfolio_type != portfolio_type:
                     continue
                 
+                n_stocks = len(yr.tickers)
+                
                 for i, ticker in enumerate(yr.tickers):
+                    gap = yr.gaps[i] if i < len(yr.gaps) else np.nan
+                    weight = yr.weights[i] if i < len(yr.weights) else 1.0 / max(n_stocks, 1)
+                    
+                    # 영향력 지표 계산
+                    contribution = gap * weight if not np.isnan(gap) else np.nan
+                    
+                    # 섹터 정보 가져오기
+                    sector = sector_map.get((ticker, yr.year), 'Unknown')
+                    
                     rows.append({
                         'Year': yr.year,
                         'Ratio': yr.ratio,
                         'Ticker': ticker,
-                        'Gap': yr.gaps[i] if i < len(yr.gaps) else np.nan,
-                        'Weight': yr.weights[i] if i < len(yr.weights) else np.nan,
-                        'Return': yr.portfolio_return  # 포트폴리오 전체 수익률
+                        'Sector': sector,
+                        'Rank': i + 1,  # 1-based rank
+                        'Gap': gap,
+                        'Weight': weight,
+                        'Contribution': contribution,  # 기여도 = Gap × Weight
+                        'PortfolioReturn': yr.portfolio_return  # 포트폴리오 전체 수익률
                     })
             
             if rows:
+                exp_num = self._get_exp_num(results.config.exp_id)
                 df = pd.DataFrame(rows)
-                path = exp_dir / 'data' / f'portfolio_holdings_{portfolio_type}.csv'
+                path = exp_dir / 'data' / f'{exp_num}-portfolio_holdings_{portfolio_type}.csv'
                 df.to_csv(path, index=False)
-                logger.info(f"  → portfolio_holdings_{portfolio_type}.csv 저장")
+                logger.info(f"  → {exp_num}-portfolio_holdings_{portfolio_type}.csv 저장 ({len(df)}행)")
     
     def _save_performance_metrics(self, exp_dir: Path, results: ExperimentResults) -> None:
         """성과 지표 저장"""
         if results.performance_metrics:
+            exp_num = self._get_exp_num(results.config.exp_id)
             df = pd.DataFrame.from_dict(results.performance_metrics, orient='index')
             df.index.name = 'Portfolio'
             
-            path = exp_dir / 'metrics' / 'performance_metrics.csv'
+            path = exp_dir / 'metrics' / f'{exp_num}-performance_metrics.csv'
             df.to_csv(path)
-            logger.info(f"  → performance_metrics.csv 저장")
+            logger.info(f"  → {exp_num}-performance_metrics.csv 저장")
     
     def _save_validation_tests(self, exp_dir: Path, results: ExperimentResults) -> None:
         """검정 결과 저장"""
         if results.validation_tests:
-            path = exp_dir / 'metrics' / 'validation_tests.json'
+            exp_num = self._get_exp_num(results.config.exp_id)
+            path = exp_dir / 'metrics' / f'{exp_num}-validation_tests.json'
             
             # numpy 타입 변환 (JSON 직렬화 위해)
             def convert(obj):
@@ -243,6 +294,8 @@ class ResultSaver:
                     return int(obj)
                 if isinstance(obj, (np.float64, np.float32)):
                     return float(obj)
+                if isinstance(obj, (np.bool_, bool)):
+                    return bool(obj)
                 if isinstance(obj, dict):
                     return {k: convert(v) for k, v in obj.items()}
                 if isinstance(obj, list):
@@ -253,7 +306,7 @@ class ResultSaver:
             
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(tests, f, indent=2, ensure_ascii=False)
-            logger.info(f"  → validation_tests.json 저장")
+            logger.info(f"  → {exp_num}-validation_tests.json 저장")
 
 
 # ========================================

@@ -1,7 +1,176 @@
 
 # M-Model 프로젝트 전체 변경 이력
 
-**마지막 업데이트**: 2026-02-10
+**마지막 업데이트**: 2026-02-13
+
+---
+
+## ✅ v3.1.2 CLI 리팩터링 및 롤링 홀딩 (2026-02-13)
+
+### 배경
+- safe_lag를 실험마다 하드코딩으로 변경 → CLI 옵션 필요
+- 분기/반기 리밸런싱 시 전체 포트폴리오 교체 → 12개월 롤링 홀딩으로 변경
+- 프리셋 기반 CLI → 파라미터 기반 CLI로 전환 필요
+
+### 주요 변경 사항
+
+#### 1. CLI 파라미터 기반 실험 실행 (run_experiment.py v2)
+
+**기존 (deprecated):**
+```bash
+python run_experiment.py --preset ranknet --safe_lag 3
+```
+
+**변경 후:**
+```bash
+python run_experiment.py -u SP500 -s ALL -w 5 -f A -l RankNet -sl 3
+```
+
+**새 파라미터:**
+
+| 옵션 | 축약 | 선택지 | 기본값 | 설명 |
+|------|------|--------|--------|------|
+| `--universe` | `-u` | SP500, FULL | SP500 | 유니버스 |
+| `--sector` | `-s` | ALL, BioIT | ALL | 섹터 필터 |
+| `--window` | `-w` | 3, 5 | 5 | 학습 윈도우(년) |
+| `--freq` | `-f` | A, Q, S | A | 리밸런싱 주기 |
+| `--loss` | `-l` | MSE, RankNet | RankNet | 손실함수 |
+| `--safe_lag` | `-sl` | 0, 3 | 3 | Safe Lag(월) |
+
+#### 2. 분기/반기 롤링 12개월 홀딩
+
+**기존 동작:**
+| 주기 | 리밸런싱 시점 | 홀딩 기간 | 동작 |
+|------|--------------|----------|------|
+| Quarterly | 3/6/9/12월 | 3개월 | 매 분기 포트폴리오 전체 교체 |
+
+**변경 후:**
+| 주기 | 리밸런싱 시점 | 홀딩 기간 | 동작 |
+|------|--------------|----------|------|
+| Quarterly | 3/6/9/12월 | **12개월** | 각 분기 포트폴리오 1년간 유지 (롤링) |
+
+**예시 (Quarterly):**
+- 2020 Q1 포트폴리오: 2020-03 매수 → 2021-03 매도
+- 2020 Q2 포트폴리오: 2020-06 매수 → 2021-06 매도
+- 특정 시점에 항상 4개 분기 포트폴리오가 동시에 홀딩됨
+- 각 분기 포트폴리오 가중치는 25%씩
+
+**수정 파일:**
+- `experiments/src/runner.py` - `run_backtest_for_quarter()` 메서드 추가
+- `experiments/src/config.py` - quarterly 프리셋의 `holding_months=12`
+
+#### 3. Safe Lag 분석 결과
+
+**실험 결과:**
+| 실험 | Safe Lag | CAGR | 비고 |
+|------|----------|------|------|
+| exp_003 | 0 | 24.99% | 12월 매수 (편향) |
+| exp_003_1 | 3 | **28.46%** | 3월 매수 (무편향) |
+| exp_004 | 0 | 25.33% | 12월 매수 (편향) |
+| exp_004_1 | 3 | **28.17%** | 3월 매수 (무편향) |
+
+**발견:**
+- Safe Lag=3 (무편향) 버전이 오히려 더 높은 수익률
+- 원인: FY2019 + Safe Lag=3 = **2020년 3월 COVID 바닥에서 매수**
+- FY2019 단일 연도 수익률: 105% (COVID 타이밍 운)
+- 이는 Data Leakage가 아닌 **타이밍 행운**
+
+**결론:**
+- Safe Lag=3이 올바른 설정 (Look-ahead bias 방지)
+- COVID 타이밍 효과는 백테스트 특성상 허용
+
+---
+
+## ✅ v3.1.1 성과 지표 및 검정 강화 (2026-02-11)
+
+### 배경
+- Beta 지표가 계산되지만 보고서에 표시되지 않음
+- 포트폴리오 기여도(영향력) 지표 미흡
+- 강건성 검정에 Bootstrap CI 없음
+
+### 주요 변경 사항
+
+#### 1. 보고서에 Beta 추가 (reporter.py)
+**변경 전:**
+| 비율 | CAGR | Sharpe | MDD | WinRate | Alpha |
+|------|------|--------|-----|---------|-------|
+
+**변경 후:**
+| 비율 | CAGR | Sharpe | MDD | WinRate | Alpha | Beta |
+|------|------|--------|-----|---------|-------|------|
+
+#### 2. 포트폴리오 영향력 지표 추가 (saver.py)
+`portfolio_holdings_*.csv` 저장 필드:
+- `Rank`: Gap 기준 순위
+- `Weight`: 종목 비중
+- `Contribution`: Gap × Weight (기여도)
+
+#### 3. Bootstrap 강건성 검정 추가 (runner.py)
+- 1,000회 Bootstrap으로 95% CI 계산
+- `is_robust`: 95% CI가 0을 포함하지 않으면 True
+- 보고서에 강건성 표 자동 생성
+
+---
+
+## ✅ v3.1.0 멀티 프리퀀시 파이프라인 및 Safe Lag (2026-02-11)
+
+### 배경
+- 연간(annual) 리밸런싱만 지원 → 분기/반기 리밸런싱 옵션 추가 필요
+- Look-ahead bias: 분기말 데이터를 분기말에 바로 사용 (10-Q 공시 지연 미반영)
+- RankNet 손실 함수가 연간 버전만 존재
+
+### 주요 변경 사항
+
+#### 1. Safe Lag 적용 (Look-ahead Bias 방지)
+**문제**: 10-Q 공시는 분기 종료 후 ~45일 지연
+**해결**: 리밸런싱 시점에 `SAFE_LAG_MONTHS = 3` 지연 적용
+
+| 재무 분기 | 실적 마감 | 기존 리밸런싱 | Safe Lag 적용 후 |
+|-----------|-----------|---------------|------------------|
+| Q1 | 3월 말 | 3월 말 ❌ | 6월 말 ✅ |
+| Q2 | 6월 말 | 6월 말 ❌ | 9월 말 ✅ |
+| Q3 | 9월 말 | 9월 말 ❌ | 12월 말 ✅ |
+| Q4 | 12월 말 | 12월 말 ❌ | 3월 말 ✅ |
+
+**수정 파일:**
+- `backtesting/step5_backtest_quarterly.py`
+- `backtesting/step5_backtest_semiannual.py`
+
+#### 2. 분기/반기 파이프라인 추가
+
+**새로 생성된 파일:**
+
+| 단계 | 분기 | 반기 |
+|------|------|------|
+| Step3 Feature | `step3_feature_builder_quarterly.py` | `step3_feature_builder_semiannual.py` |
+| Step4 MSE | `step4_train_predict_quarterly.py` | `step4_train_predict_semiannual.py` |
+| Step4 RankNet | `step4_train_predict_ranknet_quarterly.py` | `step4_train_predict_ranknet_semiannual.py` |
+| Step5 Backtest | `step5_backtest_quarterly.py` | `step5_backtest_semiannual.py` |
+
+#### 3. experiments/config.py 확장
+
+**새 옵션:**
+```python
+@dataclass
+class ExperimentConfig:
+    rebalance_frequency: str = 'annual'  # 'annual', 'semiannual', 'quarterly'
+    included_sectors: Optional[List[str]] = None  # 섹터 필터 (e.g., ['Healthcare', 'Technology'])
+    safe_lag_months: int = 3  # Look-ahead bias 방지
+```
+
+**새 프리셋 함수:**
+- `get_biotech_it_config()` - 바이오&IT 섹터 필터
+- `get_biotech_it_quarterly_config()` - 바이오&IT + 분기
+- `get_biotech_it_semiannual_config()` - 바이오&IT + 반기
+
+#### 4. RankNet 분기/반기 주요 특징
+
+| 구분 | 분기 (Quarterly) | 반기 (Semiannual) |
+|------|------------------|-------------------|
+| Period Index | `FiscalYear*4 + FiscalQuarter` | `FiscalYear*2 + Half` |
+| Train Window | 12분기 (3년) | 6반기 (3년) |
+| 필터 | 모든 FiscalQuarter | FiscalQuarter ∈ [2, 4] |
+| 배치 구성 | 동일 (Year, Quarter) | 동일 (Year, Quarter) |
 
 ---
 

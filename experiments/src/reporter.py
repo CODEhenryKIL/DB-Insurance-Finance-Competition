@@ -14,7 +14,8 @@
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent
+# experiments/src/ -> experiments/ -> 프로젝트 루트
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import pandas as pd
@@ -22,7 +23,7 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from config.constants import BENCHMARK_INDICES
+from config.constants import BENCHMARK_INDICES, BENCHMARK_RETURNS
 from utils.logger import get_logger
 from .config import ExperimentConfig
 from .runner import ExperimentResults
@@ -30,7 +31,7 @@ from .runner import ExperimentResults
 logger = get_logger(__name__)
 
 # 기본 실험 폴더
-EXPERIMENTS_V2_DIR = project_root / 'experiments_v2'
+EXPERIMENTS_DIR = project_root / 'experiments'
 
 
 class ReportGenerator:
@@ -48,7 +49,19 @@ class ReportGenerator:
     8. 결론 및 인사이트
     """
     
-    def __init__(self, base_dir: Path = EXPERIMENTS_V2_DIR):
+    @staticmethod
+    def _get_exp_num(exp_id: str) -> str:
+        """
+        exp_id에서 실험 번호 추출
+        
+        'exp_001' -> '001'
+        'exp_012' -> '012'
+        """
+        import re
+        match = re.search(r'(\d+)', exp_id)
+        return match.group(1) if match else exp_id
+    
+    def __init__(self, base_dir: Path = EXPERIMENTS_DIR):
         """
         초기화
         
@@ -110,30 +123,34 @@ class ReportGenerator:
         # 5. 벤치마크 비교
         sections.append(self._generate_benchmark_comparison(results))
         
-        # 6. 이전 실험과 비교
+        # 6. 섹터 비율
+        sections.append(self._generate_sector_breakdown(results))
+        
+        # 7. 이전 실험과 비교
         if compare_results:
             sections.append(self._generate_experiment_comparison(results, compare_results))
         
-        # 7. 검정 결과 요약
+        # 8. 검정 결과 요약
         sections.append(self._generate_validation_summary(results))
         
-        # 8. 현재 문제점
+        # 9. 현재 문제점
         sections.append(self._generate_problems_section(problems, results))
         
-        # 9. 개선 아이디어
+        # 10. 개선 아이디어
         sections.append(self._generate_improvements_section(improvements))
         
-        # 10. 결론 및 인사이트
+        # 11. 결론 및 인사이트
         sections.append(self._generate_conclusions_section(conclusions, results))
         
         # 보고서 저장
         report_content = '\n\n'.join(sections)
-        report_path = exp_dir / 'REPORT.md'
+        exp_num = self._get_exp_num(results.config.exp_id)
+        report_path = exp_dir / f'{exp_num}-REPORT.md'
         
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(report_content)
         
-        logger.info(f"  → REPORT.md 저장: {report_path}")
+        logger.info(f"  → {exp_num}-REPORT.md 저장: {report_path}")
         
         return report_path
     
@@ -211,7 +228,11 @@ class ReportGenerator:
                     None
                 )
                 if yr and 'S&P500' in yr.benchmark_returns:
-                    row += f" {yr.benchmark_returns['S&P500']*100:+.1f}% |"
+                    bench_ret = yr.benchmark_returns['S&P500']
+                    if bench_ret is not None and not np.isnan(bench_ret):
+                        row += f" {bench_ret*100:+.1f}% |"
+                    else:
+                        row += " - |"
                 else:
                     row += " - |"
                 
@@ -219,60 +240,162 @@ class ReportGenerator:
         
         return '\n'.join(sections)
     
+    def _calculate_benchmark_metrics(self, years: List) -> Dict:
+        """벤치마크 CAGR, Sharpe, MDD 계산
+        
+        Note: years는 매수 연도. 벤치마크 수익률은 year+1 기준으로 조회.
+        분기 데이터의 경우 2015.3 같은 float일 수 있으므로 정수 연도로 변환.
+        """
+        benchmarks = {}
+        
+        # 분기 데이터의 경우 정수 연도만 추출 (중복 제거)
+        unique_years = sorted(set(int(y) for y in years))
+        
+        for bench in ['S&P500', 'Russell3000', 'Russell2000']:
+            returns = []
+            for year in unique_years:
+                # 수익률은 매수 연도+1에서 발생
+                return_year = year + 1
+                if return_year in BENCHMARK_RETURNS and bench in BENCHMARK_RETURNS[return_year]:
+                    returns.append(BENCHMARK_RETURNS[return_year][bench])
+            
+            if returns:
+                returns = np.array(returns)
+                n_years = len(returns)
+                
+                # CAGR
+                total_return = np.prod(1 + returns) - 1
+                cagr = (1 + total_return) ** (1 / n_years) - 1 if n_years > 0 else np.nan
+                
+                # Sharpe (annualized, rf=2%)
+                mean_ret = np.mean(returns)
+                std_ret = np.std(returns)
+                sharpe = (mean_ret - 0.02) / std_ret if std_ret > 0 else np.nan
+                
+                # MDD
+                cumulative = np.cumprod(1 + returns)
+                running_max = np.maximum.accumulate(cumulative)
+                drawdown = (cumulative - running_max) / running_max
+                mdd = np.min(drawdown)
+                
+                benchmarks[bench] = {
+                    'CAGR': cagr,
+                    'Sharpe': sharpe,
+                    'MDD': mdd
+                }
+        
+        return benchmarks
+    
     def _generate_performance_table(self, results: ExperimentResults) -> str:
-        """성과 지표 표 생성"""
+        """성과 지표 표 생성 (벤치마크 행 + 3개 Alpha/Beta 포함)"""
         sections = ["## 3. 포트폴리오별 성과 지표"]
         
         if not results.performance_metrics:
             sections.append("\n*성과 지표 없음*")
             return '\n'.join(sections)
         
-        # 일반 포트폴리오
-        sections.append("\n### 일반 포트폴리오")
-        sections.append("| 비율 | CAGR | Sharpe | MDD | WinRate | Alpha (S&P500) |")
-        sections.append("|------|------|--------|-----|---------|----------------|")
+        # 벤치마크 지표 계산
+        years = sorted(set(r.year for r in results.yearly_results))
+        bench_metrics = self._calculate_benchmark_metrics(years)
         
+        # ===== 일반 포트폴리오 =====
+        sections.append("\n### 일반 포트폴리오")
+        sections.append("| 비율 | CAGR | Sharpe | MDD | WinRate | α(SPX) | β(SPX) | α(R3K) | β(R3K) |")
+        sections.append("|------|------|--------|-----|---------|--------|--------|--------|--------|")
+        
+        # 벤치마크 행 먼저
+        for bench in ['S&P500', 'Russell3000']:
+            if bench in bench_metrics:
+                bm = bench_metrics[bench]
+                bench_label = "S&P500" if bench == "S&P500" else "R3000"
+                sections.append(
+                    f"| **{bench_label}** | {bm['CAGR']*100:.1f}% | {bm['Sharpe']:.2f} | "
+                    f"{bm['MDD']*100:.1f}% | - | - | - | - | - |"
+                )
+        
+        # 포트폴리오 행
         for ratio in results.config.long_ratios:
             key = f"normal_{int(ratio*100)}"
             if key in results.performance_metrics:
                 m = results.performance_metrics[key]
-                alpha = m.get('Alpha_vs_S&P500', np.nan)
+                
+                # S&P500 Alpha/Beta
+                alpha_spx = m.get('Alpha_vs_S&P500', np.nan)
+                beta_spx = m.get('Beta_vs_S&P500', np.nan)
+                alpha_spx_str = f"{alpha_spx*100:+.1f}%" if not np.isnan(alpha_spx) else "-"
+                beta_spx_str = f"{beta_spx:.2f}" if not np.isnan(beta_spx) else "-"
+                
+                # Russell3000 Alpha/Beta
+                alpha_r3k = m.get('Alpha_vs_Russell3000', np.nan)
+                beta_r3k = m.get('Beta_vs_Russell3000', np.nan)
+                alpha_r3k_str = f"{alpha_r3k*100:+.1f}%" if not np.isnan(alpha_r3k) else "-"
+                beta_r3k_str = f"{beta_r3k:.2f}" if not np.isnan(beta_r3k) else "-"
+                
                 sections.append(
                     f"| {ratio*100:.0f}% | "
                     f"{m.get('CAGR', np.nan)*100:.1f}% | "
                     f"{m.get('Sharpe', np.nan):.2f} | "
                     f"{m.get('MDD', np.nan)*100:.1f}% | "
                     f"{m.get('WinRate', np.nan)*100:.0f}% | "
-                    f"{alpha*100:+.1f}% |" if not np.isnan(alpha) else f"- |"
+                    f"{alpha_spx_str} | {beta_spx_str} | "
+                    f"{alpha_r3k_str} | {beta_r3k_str} |"
                 )
         
-        # 소형주 포트폴리오
+        # ===== 소형주 포트폴리오 =====
         sections.append("\n### 소형주 포트폴리오")
-        sections.append("| 비율 | CAGR | Sharpe | MDD | WinRate | Alpha (R2000) |")
-        sections.append("|------|------|--------|-----|---------|----------------|")
+        sections.append("| 비율 | CAGR | Sharpe | MDD | WinRate | α(R2K) | β(R2K) | α(R3K) | β(R3K) |")
+        sections.append("|------|------|--------|-----|---------|--------|--------|--------|--------|")
         
+        # 벤치마크 행 먼저
+        for bench in ['Russell2000', 'Russell3000']:
+            if bench in bench_metrics:
+                bm = bench_metrics[bench]
+                bench_label = "R2000" if bench == "Russell2000" else "R3000"
+                sections.append(
+                    f"| **{bench_label}** | {bm['CAGR']*100:.1f}% | {bm['Sharpe']:.2f} | "
+                    f"{bm['MDD']*100:.1f}% | - | - | - | - | - |"
+                )
+        
+        # 포트폴리오 행
         for ratio in results.config.long_ratios:
             key = f"smallcap_{int(ratio*100)}"
             if key in results.performance_metrics:
                 m = results.performance_metrics[key]
-                alpha = m.get('Alpha_vs_Russell2000', np.nan)
-                alpha_str = f"{alpha*100:+.1f}%" if not np.isnan(alpha) else "-"
+                
+                # Russell2000 Alpha/Beta
+                alpha_r2k = m.get('Alpha_vs_Russell2000', np.nan)
+                beta_r2k = m.get('Beta_vs_Russell2000', np.nan)
+                alpha_r2k_str = f"{alpha_r2k*100:+.1f}%" if not np.isnan(alpha_r2k) else "-"
+                beta_r2k_str = f"{beta_r2k:.2f}" if not np.isnan(beta_r2k) else "-"
+                
+                # Russell3000 Alpha/Beta
+                alpha_r3k = m.get('Alpha_vs_Russell3000', np.nan)
+                beta_r3k = m.get('Beta_vs_Russell3000', np.nan)
+                alpha_r3k_str = f"{alpha_r3k*100:+.1f}%" if not np.isnan(alpha_r3k) else "-"
+                beta_r3k_str = f"{beta_r3k:.2f}" if not np.isnan(beta_r3k) else "-"
+                
                 sections.append(
                     f"| {ratio*100:.0f}% | "
                     f"{m.get('CAGR', np.nan)*100:.1f}% | "
                     f"{m.get('Sharpe', np.nan):.2f} | "
                     f"{m.get('MDD', np.nan)*100:.1f}% | "
                     f"{m.get('WinRate', np.nan)*100:.0f}% | "
-                    f"{alpha_str} |"
+                    f"{alpha_r2k_str} | {beta_r2k_str} | "
+                    f"{alpha_r3k_str} | {beta_r3k_str} |"
                 )
         
         return '\n'.join(sections)
     
     def _generate_benchmark_comparison(self, results: ExperimentResults) -> str:
-        """벤치마크 비교 생성"""
+        """벤치마크 비교 생성 (전체 포트폴리오 vs 벤치마크)"""
         sections = ["## 4. 벤치마크 비교"]
         
-        # 최고 성과 포트폴리오 찾기
+        # 벤치마크 지표 계산
+        years = sorted(set(r.year for r in results.yearly_results))
+        bench_metrics = self._calculate_benchmark_metrics(years)
+        
+        # 일반 포트폴리오 최고 성과
+        sections.append("\n### 일반 포트폴리오 최고 성과")
         best_normal = None
         best_normal_cagr = -np.inf
         
@@ -287,21 +410,134 @@ class ReportGenerator:
             m = results.performance_metrics[best_normal]
             sections.append(f"\n**최고 성과 포트폴리오**: {best_normal}")
             sections.append("")
-            sections.append("| 벤치마크 | 전략 CAGR | 벤치마크 CAGR | Alpha |")
-            sections.append("|----------|-----------|---------------|-------|")
+            sections.append("| 지표 | 전략 | S&P500 | Russell3000 | 차이(SPX) |")
+            sections.append("|------|------|--------|-------------|-----------|")
             
             strategy_cagr = m.get('CAGR', np.nan)
+            strategy_sharpe = m.get('Sharpe', np.nan)
+            strategy_mdd = m.get('MDD', np.nan)
             
-            for bench in BENCHMARK_INDICES[:3]:  # 상위 3개만
-                alpha = m.get(f'Alpha_vs_{bench}', np.nan)
-                if not np.isnan(alpha):
-                    bench_cagr = strategy_cagr - alpha
-                    sections.append(
-                        f"| {bench} | {strategy_cagr*100:.1f}% | "
-                        f"{bench_cagr*100:.1f}% | {alpha*100:+.1f}% |"
-                    )
-        else:
-            sections.append("\n*비교 가능한 포트폴리오 없음*")
+            spx = bench_metrics.get('S&P500', {})
+            r3k = bench_metrics.get('Russell3000', {})
+            
+            spx_cagr = spx.get('CAGR', np.nan)
+            diff_cagr = strategy_cagr - spx_cagr if not np.isnan(spx_cagr) else np.nan
+            
+            sections.append(
+                f"| CAGR | {strategy_cagr*100:.1f}% | {spx.get('CAGR', np.nan)*100:.1f}% | "
+                f"{r3k.get('CAGR', np.nan)*100:.1f}% | {diff_cagr*100:+.1f}% |"
+            )
+            sections.append(
+                f"| Sharpe | {strategy_sharpe:.2f} | {spx.get('Sharpe', np.nan):.2f} | "
+                f"{r3k.get('Sharpe', np.nan):.2f} | {strategy_sharpe - spx.get('Sharpe', 0):+.2f} |"
+            )
+            sections.append(
+                f"| MDD | {strategy_mdd*100:.1f}% | {spx.get('MDD', np.nan)*100:.1f}% | "
+                f"{r3k.get('MDD', np.nan)*100:.1f}% | {(strategy_mdd - spx.get('MDD', 0))*100:+.1f}%p |"
+            )
+        
+        # 소형주 포트폴리오 최고 성과
+        sections.append("\n### 소형주 포트폴리오 최고 성과")
+        best_smallcap = None
+        best_smallcap_cagr = -np.inf
+        
+        for key, metrics in results.performance_metrics.items():
+            if key.startswith('smallcap_'):
+                cagr = metrics.get('CAGR', -np.inf)
+                if cagr > best_smallcap_cagr:
+                    best_smallcap_cagr = cagr
+                    best_smallcap = key
+        
+        if best_smallcap:
+            m = results.performance_metrics[best_smallcap]
+            sections.append(f"\n**최고 성과 포트폴리오**: {best_smallcap}")
+            sections.append("")
+            sections.append("| 지표 | 전략 | Russell2000 | Russell3000 | 차이(R2K) |")
+            sections.append("|------|------|-------------|-------------|-----------|")
+            
+            strategy_cagr = m.get('CAGR', np.nan)
+            strategy_sharpe = m.get('Sharpe', np.nan)
+            strategy_mdd = m.get('MDD', np.nan)
+            
+            r2k = bench_metrics.get('Russell2000', {})
+            r3k = bench_metrics.get('Russell3000', {})
+            
+            r2k_cagr = r2k.get('CAGR', np.nan)
+            diff_cagr = strategy_cagr - r2k_cagr if not np.isnan(r2k_cagr) else np.nan
+            
+            sections.append(
+                f"| CAGR | {strategy_cagr*100:.1f}% | {r2k.get('CAGR', np.nan)*100:.1f}% | "
+                f"{r3k.get('CAGR', np.nan)*100:.1f}% | {diff_cagr*100:+.1f}% |"
+            )
+            sections.append(
+                f"| Sharpe | {strategy_sharpe:.2f} | {r2k.get('Sharpe', np.nan):.2f} | "
+                f"{r3k.get('Sharpe', np.nan):.2f} | {strategy_sharpe - r2k.get('Sharpe', 0):+.2f} |"
+            )
+            sections.append(
+                f"| MDD | {strategy_mdd*100:.1f}% | {r2k.get('MDD', np.nan)*100:.1f}% | "
+                f"{r3k.get('MDD', np.nan)*100:.1f}% | {(strategy_mdd - r2k.get('MDD', 0))*100:+.1f}%p |"
+            )
+        
+        return '\n'.join(sections)
+    
+    def _generate_sector_breakdown(self, results: ExperimentResults) -> str:
+        """
+        섹터 비율 분석
+        
+        각 포트폴리오(normal_5, smallcap_5 등)별로 섹터 비중을 분석
+        """
+        sections = ["## 5. 섹터 비율 분석"]
+        
+        # predictions_with_rank에서 섹터 매핑 생성
+        if results.predictions_with_rank is None or 'Sector' not in results.predictions_with_rank.columns:
+            sections.append("\n*섹터 정보 없음*")
+            return '\n'.join(sections)
+        
+        pred_df = results.predictions_with_rank
+        
+        # 포트폴리오별 섹터 비율 계산
+        for portfolio_type in ["normal", "smallcap"]:
+            type_label = "일반 포트폴리오" if portfolio_type == "normal" else "소형주 포트폴리오"
+            sections.append(f"\n### {type_label}")
+            
+            # TOP 5% 포트폴리오만 분석 (다른 비율도 원하면 추가)
+            ratio = 0.05
+            
+            # 연도별로 top N 종목의 섹터 수집
+            sector_counts = {}
+            total_stocks = 0
+            
+            for yr in results.yearly_results:
+                if yr.portfolio_type != portfolio_type or yr.ratio != ratio:
+                    continue
+                
+                for ticker in yr.tickers:
+                    # 해당 연도, 티커의 섹터 찾기
+                    mask = (pred_df['Ticker'] == ticker) & (pred_df['FiscalYear'] == yr.year)
+                    matched = pred_df[mask]
+                    
+                    if len(matched) > 0:
+                        sector = matched['Sector'].iloc[0]
+                        if pd.notna(sector):
+                            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+                            total_stocks += 1
+            
+            if total_stocks == 0:
+                sections.append("*데이터 없음*")
+                continue
+            
+            # 비율 계산 및 정렬
+            sector_pcts = {k: v / total_stocks * 100 for k, v in sector_counts.items()}
+            sorted_sectors = sorted(sector_pcts.items(), key=lambda x: -x[1])
+            
+            sections.append(f"\n**{int(ratio*100)}% 포트폴리오 섹터 비율** (전체 {total_stocks}개 종목-연도)")
+            sections.append("")
+            sections.append("| 섹터 | 비율 | 종목수 |")
+            sections.append("|------|------|--------|")
+            
+            for sector, pct in sorted_sectors[:10]:  # 상위 10개만
+                count = sector_counts[sector]
+                sections.append(f"| {sector} | {pct:.1f}% | {count} |")
         
         return '\n'.join(sections)
     
@@ -331,7 +567,7 @@ class ReportGenerator:
         return '\n'.join(sections)
     
     def _generate_validation_summary(self, results: ExperimentResults) -> str:
-        """검정 결과 요약"""
+        """검정 결과 요약 (Bootstrap 강건성 포함)"""
         sections = ["## 6. 검정 결과 요약"]
         
         tests = results.validation_tests
@@ -340,6 +576,7 @@ class ReportGenerator:
         if 'rank_ic' in tests:
             ic = tests['rank_ic']
             sections.append(f"\n### Rank IC (예측력)")
+            sections.append("> Rank IC: 예측값(yhat)과 실제값(y)의 Spearman 순위상관. 높을수록 예측력 좋음.")
             sections.append(f"- **평균 Rank IC**: {ic.get('mean_ic', np.nan):.4f}")
             sections.append(f"- **표준편차**: {ic.get('std_ic', np.nan):.4f}")
             
@@ -353,9 +590,54 @@ class ReportGenerator:
         if 'weight_stability' in tests:
             ws = tests['weight_stability']
             sections.append(f"\n### 가중치 안정성")
-            sections.append(f"- m1 std: {ws.get('m1_std', np.nan):.4f}")
-            sections.append(f"- m2 std: {ws.get('m2_std', np.nan):.4f}")
-            sections.append(f"- m3 std: {ws.get('m3_std', np.nan):.4f}")
+            sections.append("> 모델 가중치(m1, m2, m3)의 연도별 표준편차. 낮을수록 시간에 따른 모델 안정성 높음.")
+            sections.append("")
+            sections.append("| 피처 | 평균 가중치 | 표준편차 |")
+            sections.append("|------|-------------|----------|")
+            
+            m1_mean = ws.get('m1_mean', np.nan)
+            m2_mean = ws.get('m2_mean', np.nan)
+            m3_mean = ws.get('m3_mean', np.nan)
+            m1_std = ws.get('m1_std', np.nan)
+            m2_std = ws.get('m2_std', np.nan)
+            m3_std = ws.get('m3_std', np.nan)
+            
+            sections.append(f"| m1 (PBR역수) | {m1_mean:.4f} | {m1_std:.4f} |")
+            sections.append(f"| m2 (ROA) | {m2_mean:.4f} | {m2_std:.4f} |")
+            sections.append(f"| m3 (조정영업이익) | {m3_mean:.4f} | {m3_std:.4f} |")
+        
+        # 강건성 (Bootstrap)
+        robust_count = 0
+        total_count = 0
+        
+        sections.append(f"\n### 포트폴리오 강건성 (Bootstrap 95% CI)")
+        sections.append("> Bootstrap: 1000회 리샘플링으로 수익률 신뢰구간 계산. 95% CI가 0을 포함하지 않으면 '강건' (통계적으로 유의미한 양수 수익률)")
+        sections.append("")
+        sections.append("| 포트폴리오 | 평균 수익률 | 95% CI | 강건성 |")
+        sections.append("|------------|-------------|--------|--------|")
+        
+        for key, val in tests.items():
+            if key.startswith('robustness_'):
+                portfolio_name = key.replace('robustness_', '')
+                mean_ret = val.get('mean_return', np.nan)
+                ci_lower = val.get('bootstrap_ci_95_lower', np.nan)
+                ci_upper = val.get('bootstrap_ci_95_upper', np.nan)
+                is_robust = val.get('is_robust', False)
+                
+                total_count += 1
+                if is_robust:
+                    robust_count += 1
+                
+                ci_str = f"[{ci_lower*100:.1f}%, {ci_upper*100:.1f}%]" if not np.isnan(ci_lower) else "-"
+                robust_str = "✅ 강건" if is_robust else "⚠️ 불안정"
+                
+                sections.append(
+                    f"| {portfolio_name} | {mean_ret*100:.1f}% | {ci_str} | {robust_str} |"
+                )
+        
+        if total_count > 0:
+            sections.append(f"\n**강건 포트폴리오**: {robust_count}/{total_count} ({robust_count/total_count*100:.0f}%)")
+            sections.append(f"> {robust_count}개 포트폴리오의 95% 신뢰구간이 0을 포함하지 않음 (통계적으로 유의미한 양수 수익률)")
         
         return '\n'.join(sections)
     

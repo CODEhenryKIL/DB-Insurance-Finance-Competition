@@ -27,10 +27,10 @@ experiments_v2/
 │   └── REPORT.md
 """
 
-from .config import ExperimentConfig
-from .runner import ExperimentRunner
-from .saver import ResultSaver
-from .reporter import ReportGenerator
+from .src.config import ExperimentConfig
+from .src.runner import ExperimentRunner
+from .src.saver import ResultSaver
+from .src.reporter import ReportGenerator
 
 __all__ = [
     'ExperimentConfig',

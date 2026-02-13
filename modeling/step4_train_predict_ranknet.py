@@ -67,8 +67,8 @@ from utils.logger import get_logger, log_dataframe_info
 from modeling.model_ranknet import (
     LinearRankNetModel,
     RankNetLoss,
-    calculate_rank_ic,
-    calculate_ndcg
+    compute_rank_ic,
+    compute_ndcg
 )
 
 logger = get_logger(__name__)
@@ -176,7 +176,8 @@ class RankNetRollingTrainer:
         learning_rate: float = RANKNET_LEARNING_RATE,
         epochs: int = RANKNET_EPOCHS,
         batch_size: int = RANKNET_BATCH_SIZE,
-        sigma: float = RANKNET_SIGMA
+        sigma: float = RANKNET_SIGMA,
+        output_suffix: str = 'ranknet'
     ):
         """
         초기화
@@ -193,12 +194,15 @@ class RankNetRollingTrainer:
             Cross-sectional 미니배치 크기 (메모리 고려)
         sigma : float
             RankNet 스케일링 파라미터
+        output_suffix : str
+            출력 파일 접미사 (예: ranknet, ranknet_3y)
         """
         self.train_window_years = train_window_years
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
         self.sigma = sigma
+        self.output_suffix = output_suffix
         
         logger.info("RankNet Rolling Trainer 초기화 완료")
         logger.info(f"  - Train window: {train_window_years}년")
@@ -423,12 +427,12 @@ class RankNetRollingTrainer:
                 pred_np = scores.numpy().flatten()
                 actual_np = y.numpy().flatten()
                 
-                rank_ic = calculate_rank_ic(pred_np, actual_np)
+                rank_ic = compute_rank_ic(pred_np, actual_np)
                 rank_ics.append(rank_ic)
                 
                 # NDCG@10%
                 k = max(1, len(year_df) // 10)
-                ndcg = calculate_ndcg(pred_np, actual_np, k=k)
+                ndcg = compute_ndcg(pred_np, actual_np, k=k)
                 ndcgs.append(ndcg)
         
         return {
@@ -640,7 +644,7 @@ class RankNetRollingTrainer:
                 
                 # Rank IC 계산
                 y_actual = test_df['y'].values
-                rank_ic = calculate_rank_ic(scores, y_actual)
+                rank_ic = compute_rank_ic(scores, y_actual)
                 
                 # Gap 계산 (score - y)
                 # RankNet에서 score는 상대적 순위 점수이므로
@@ -696,22 +700,22 @@ class RankNetRollingTrainer:
         # 5. 저장
         logger.info(f"[5단계] 캐시 저장 중...")
         
-        # 예측 결과 저장 (RankNet 버전)
-        output_path = CACHE_DIR / 'step4_predictions_ranknet.csv'
+        # 예측 결과 저장 (suffix 적용)
+        output_path = CACHE_DIR / f'step4_predictions_{self.output_suffix}.csv'
         predictions_df.to_csv(output_path)
         logger.info(f"  ✅ 예측 결과: {output_path}")
         
         # 가중치 히스토리
         if weights_history:
             weights_df = pd.DataFrame(weights_history)
-            weights_path = CACHE_DIR / 'step4_weights_history_ranknet.csv'
+            weights_path = CACHE_DIR / f'step4_weights_history_{self.output_suffix}.csv'
             weights_df.to_csv(weights_path, index=False)
             logger.info(f"  ✅ 가중치 히스토리: {weights_path}")
         
         # 메트릭 히스토리
         if metrics_history:
             metrics_df = pd.DataFrame(metrics_history)
-            metrics_path = CACHE_DIR / 'step4_metrics_ranknet.csv'
+            metrics_path = CACHE_DIR / f'step4_metrics_{self.output_suffix}.csv'
             metrics_df.to_csv(metrics_path, index=False)
             logger.info(f"  ✅ 메트릭 히스토리: {metrics_path}")
         
@@ -732,11 +736,21 @@ if __name__ == '__main__':
     
     실행:
     python modeling/step4_train_predict_ranknet.py
+    python modeling/step4_train_predict_ranknet.py --window 3 --suffix ranknet_3y
     
     출력 파일:
     - data_cache/step4_predictions_ranknet.csv
     - data_cache/step4_weights_history_ranknet.csv
     - data_cache/step4_metrics_ranknet.csv
     """
-    trainer = RankNetRollingTrainer()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='RankNet Rolling Training')
+    parser.add_argument('--window', type=int, default=5,
+                        help='Train window years (default: 5)')
+    parser.add_argument('--suffix', type=str, default='ranknet',
+                        help='Output file suffix (default: ranknet)')
+    args = parser.parse_args()
+    
+    trainer = RankNetRollingTrainer(train_window_years=args.window, output_suffix=args.suffix)
     predictions = trainer.run()

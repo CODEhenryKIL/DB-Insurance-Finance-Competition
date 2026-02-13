@@ -859,4 +859,38 @@ python -m data_collection.step1_price_collector_sequential
 ---
 
 *문서 생성일: 2026년 1월 29일*  
-*마지막 업데이트: 2026년 1월 30일 22:41*
+*마지막 업데이트: 2026년 2월 13일*
+
+---
+
+## 🧪 실험 프레임워크 (v3.1.2)
+
+### CLI 사용법
+
+```bash
+# 파라미터 기반 실험 실행 (권장)
+python experiments/run_experiment.py -u SP500 -s ALL -w 5 -f A -l RankNet -sl 3
+
+# 축약형 옵션
+# -u: universe (SP500, FULL)
+# -s: sector (ALL, BioIT)
+# -w: window (3, 5)
+# -f: freq (A=Annual, Q=Quarterly, S=Semiannual)
+# -l: loss (MSE, RankNet)
+# -sl: safe_lag (0=12월매수, 3=3월매수)
+```
+
+### Safe Lag 설명
+
+| Safe Lag | 동작 | Look-ahead Bias |
+|----------|------|-----------------|
+| 0 | 12월 결산 → 12월 말 매수 | 있음 (편향) |
+| 3 | 12월 결산 → 3월 말 매수 | 없음 (무편향) |
+
+### 분기/반기 롤링 홀딩
+
+| 주기 | 홀딩 기간 | 동시 운용 포트폴리오 |
+|------|----------|---------------------|
+| Annual | 12개월 | 1개 |
+| Quarterly | 12개월 | 4개 (각 25% 가중치) |
+| Semiannual | 12개월 | 2개 (각 50% 가중치) |

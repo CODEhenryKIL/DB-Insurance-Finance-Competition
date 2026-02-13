@@ -140,14 +140,19 @@ def calculate_alpha_beta(
     -------
     alpha, beta : float
     """
-    # 데이터 정렬
+    # 데이터 정렬 (NaN 제거)
     common_index = portfolio_returns.index.intersection(benchmark_returns.index)
-    
-    if len(common_index) < 2:
-        return np.nan, np.nan
     
     port_ret = portfolio_returns.loc[common_index]
     bench_ret = benchmark_returns.loc[common_index]
+    
+    # 둘 다 유효한 값만 사용
+    valid_mask = port_ret.notna() & bench_ret.notna()
+    port_ret = port_ret[valid_mask]
+    bench_ret = bench_ret[valid_mask]
+    
+    if len(port_ret) < 2:
+        return np.nan, np.nan
     
     # 초과 수익률
     port_excess = port_ret - risk_free_rate

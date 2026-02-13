@@ -34,7 +34,7 @@ TEST_TICKERS = [
 # ⭐ 시장 모드
 # 'FULL': 전체 미국 시장 (~3,640개, 현재 수집된 데이터)
 # 'SP500': S&P 500 구성종목만 (연도별 Historical Constituents 적용)
-MARKET_MODE = 'SP500'  # 'SP500' or 'FULL'
+MARKET_MODE = 'FULL'  # 'SP500' or 'FULL'
 
 # ⭐ S&P 500 티커 파일 경로
 SP500_TICKERS_FILE = 'sp500_tickers.txt'
@@ -114,7 +114,7 @@ INPUT_DIM = 3
 OUTPUT_DIM = 1
 
 # Adam optimizer learning rate
-LEARNING_RATE = 1e-2  # 0.001 → 0.01로 상향
+LEARNING_RATE = 5e-3  # 0.01 → 0.005로 하향 (안정적 학습)
 
 # 학습 epoch 수 (Early stopping과 함께 사용)
 EPOCHS = 100  # 500 → 100으로 축소 (early stopping 적용)
@@ -211,7 +211,8 @@ BENCHMARK_RETURNS = {
     2021: {'S&P500': 0.2689, 'Russell1000': 0.2476, 'Russell2000': 0.1369, 'Russell3000': 0.2400, 'Wilshire5000': 0.2282},
     2022: {'S&P500': -0.1944, 'Russell1000': -0.2041, 'Russell2000': -0.2156, 'Russell3000': -0.2048, 'Wilshire5000': -0.2143},
     2023: {'S&P500': 0.2423, 'Russell1000': 0.2451, 'Russell2000': 0.1509, 'Russell3000': 0.2395, 'Wilshire5000': 0.2429},
-    2024: {'S&P500': 0.2331, 'Russell1000': 0.2284, 'Russell2000': 0.1002, 'Russell3000': 0.2215, 'Wilshire5000': 0.2257}
+    2024: {'S&P500': 0.2331, 'Russell1000': 0.2284, 'Russell2000': 0.1002, 'Russell3000': 0.2215, 'Wilshire5000': 0.2257},
+    2025: {'S&P500': 0.0458, 'Russell1000': 0.0421, 'Russell2000': 0.0268, 'Russell3000': 0.0408, 'Wilshire5000': 0.0395}  # 2025년 1월 YTD (근사)
 }
 
 # 벤치마크 지수 리스트 (비교용)
