@@ -27,7 +27,7 @@
 ## 🗂️ 프로젝트 구조
 
 ```
-안티그래비티 - 개발/
+DB-Insurance-Finance-Competition/
 ├── config/                     # 설정 파일
 │   ├── constants.py           # 전역 상수
 │   ├── paths.py               # 경로 관리
